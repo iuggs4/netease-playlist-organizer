@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "网易云红心歌单分类",
+  "version": "0.1.0",
+  "description": "把网易云歌单按单个维度分类，并追加到手选的已有或新建歌单。",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["https://music.163.com/*", "http://music.163.com/*"],
+  "optional_host_permissions": ["https://*/*"],
+  "background": {
+    "service_worker": "src/background/index.ts",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "网易云红心歌单分类"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://music.163.com/*"],
+      "js": ["src/content/index.ts"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["panel.html"],
+      "matches": ["https://music.163.com/*"]
+    }
+  ]
+}
