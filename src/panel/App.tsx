@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { NeteaseProfile, PlaylistBrief, Song } from '@/lib/types'
+import type { Dimension, NeteaseProfile, PlaylistBrief, PlaylistNameStyle, Song } from '@/lib/types'
 import type { Settings } from '@/lib/store'
-import { DEFAULT_SETTINGS, loadSettings, saveSettings, cacheSize, clearCache } from '@/lib/store'
+import {
+  DEFAULT_SETTINGS,
+  loadSettings,
+  saveSettings,
+  cacheSize,
+  clearCache,
+  loadGenreScheme,
+  saveGenreScheme,
+  loadPlaylistNameSuggestions,
+  savePlaylistNameSuggestions,
+} from '@/lib/store'
 import {
   getPlaylistTrackIds,
   getProfile,
@@ -10,7 +20,11 @@ import {
   pickLikedPlaylist,
 } from '@/lib/netease'
 import { classifySongs, groupByDimension, type ClassifyProgress } from '@/lib/classifier'
-import type { SongOutcome } from '@/lib/classifier/llm'
+import {
+  discoverGenreDimension,
+  generatePlaylistNameSuggestions,
+  type SongOutcome,
+} from '@/lib/classifier/llm'
 import {
   applyWritePlan,
   buildWritePlan,
@@ -37,6 +51,37 @@ const STEP_LABELS: Record<Step, string> = {
 }
 
 const STEP_ORDER: Step[] = ['connect', 'select', 'configure', 'classify', 'preview']
+const PLAYLIST_NAME_STYLE_LABELS: Record<PlaylistNameStyle, string> = {
+  'japanese-literary': '日式文学',
+  concise: '简洁直白',
+  'retro-record': '复古唱片',
+  cinematic: '电影感 / 氛围感',
+  custom: '自定义',
+}
+
+function classificationRunKey(
+  playlistId: number,
+  songs: Song[],
+  dimension: Dimension,
+  settings: Pick<Settings, 'baseUrl' | 'model'>,
+): string {
+  return JSON.stringify({
+    version: 'classifier-v2',
+    playlistId,
+    songs: songs.map((song) => ({
+      id: song.id,
+      name: song.name,
+      artists: song.artists,
+      album: song.album,
+      publishTime: song.publishTime,
+    })),
+    baseUrl: settings.baseUrl,
+    model: settings.model,
+    key: dimension.key,
+    categories: dimension.categories,
+    categoryHints: dimension.categoryHints ?? {},
+  })
+}
 
 export default function App() {
   const [step, setStep] = useState<Step>('connect')
@@ -52,6 +97,8 @@ export default function App() {
   const [songMsg, setSongMsg] = useState('')
 
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
+  const [activeDimension, setActiveDimension] = useState<Dimension | null>(null)
+  const [regenerateGenreScheme, setRegenerateGenreScheme] = useState(false)
   const [progress, setProgress] = useState<ClassifyProgress | null>(null)
   const [log, setLog] = useState<string[]>([])
   const [outcomes, setOutcomes] = useState<Map<number, SongOutcome>>(new Map())
@@ -61,6 +108,7 @@ export default function App() {
   const [applyLog, setApplyLog] = useState<string[]>([])
 
   const abortRef = useRef<AbortController | null>(null)
+  const classifiedRunKeyRef = useRef<string | null>(null)
 
   const appendLog = useCallback((line: string) => {
     setLog((prev) => [...prev.slice(-199), line])
@@ -128,35 +176,147 @@ export default function App() {
     }
   }, [selected, appendLog])
 
-  const startClassify = useCallback(async () => {
+  const startClassify = useCallback(async (forceReclassify = false) => {
     if (songs.length === 0) return
+    const configuredDimension = settings.dimensions.find((dimension) => dimension.enabled)
+    if (!configuredDimension) {
+      setError('请先选择一个分类维度。')
+      return
+    }
+    if (!selected) {
+      setError('请先选择来源歌单。')
+      return
+    }
+    if (settings.playlistNameStyle === 'custom' && !settings.customPlaylistNameStyle.trim()) {
+      setError('请填写自定义歌单命名风格，或选择一个预设风格。')
+      return
+    }
+
     setError(null)
     setLog([])
     setProgress(null)
     setPlans([])
-    setDestinations({})
     setBusy(true)
     try {
       const ok = await ensureHostPermission(settings.baseUrl)
-      if (!ok) {
-        throw new Error('未授予模型接口的访问权限，无法调用大模型。')
-      }
+      if (!ok) throw new Error('未授予模型接口的访问权限，无法调用大模型。')
       await saveSettings(settings)
       const controller = new AbortController()
       abortRef.current = controller
       setStep('classify')
 
-      const result = await classifySongs(songs, settings, {
-        signal: controller.signal,
-        onProgress: (p) => {
-          setProgress(p)
-        },
-      })
-      setOutcomes(result.outcomes)
-      setCachedCount(await cacheSize())
-      if (result.failedBatches > 0) {
-        appendLog(`注意：有 ${result.failedBatches} 首未能得到分类结果`)
+      let dimension = configuredDimension
+      if (configuredDimension.key === 'genre') {
+        setProgress({ done: 0, total: songs.length, cached: 0, failed: 0, message: '正在分析当前歌单的曲风分布…' })
+        const cachedScheme = regenerateGenreScheme
+          ? null
+          : await loadGenreScheme(selected.id, settings.model, settings.maxGenreCategories)
+        if (cachedScheme) {
+          dimension = cachedScheme
+          appendLog(`复用已保存的曲风方案（${dimension.categories.length} 类）`)
+        } else {
+          dimension = await discoverGenreDimension({
+            baseUrl: settings.baseUrl,
+            apiKey: settings.apiKey,
+            model: settings.model,
+            maxCategories: settings.maxGenreCategories,
+            songs,
+            signal: controller.signal,
+          })
+          await saveGenreScheme(selected.id, settings.model, settings.maxGenreCategories, dimension)
+          appendLog(`AI 根据当前歌单生成了 ${dimension.categories.length} 类曲风方案`)
+        }
+        setRegenerateGenreScheme(false)
       }
+
+      let playlistNames: Record<string, string>
+      const needsNameModel =
+        settings.playlistNameStyle !== 'concise' ||
+        dimension.categories.some((category) => Array.from(category).length > 12)
+      if (!needsNameModel) {
+        playlistNames = Object.fromEntries(dimension.categories.map((category) => [category, category]))
+      } else {
+        setProgress({ done: 0, total: songs.length, cached: 0, failed: 0, message: '正在按所选风格生成歌单名建议…' })
+        const cachedNames = await loadPlaylistNameSuggestions(
+          settings.baseUrl,
+          settings.model,
+          dimension,
+          settings.playlistNameStyle,
+          settings.customPlaylistNameStyle,
+        )
+        if (cachedNames) {
+          playlistNames = cachedNames
+          appendLog('复用已保存的歌单名建议')
+        } else {
+          playlistNames = await generatePlaylistNameSuggestions({
+            baseUrl: settings.baseUrl,
+            apiKey: settings.apiKey,
+            model: settings.model,
+            dimension,
+            style: settings.playlistNameStyle,
+            customStyle: settings.customPlaylistNameStyle,
+            signal: controller.signal,
+          })
+          await savePlaylistNameSuggestions(
+            settings.baseUrl,
+            settings.model,
+            dimension,
+            settings.playlistNameStyle,
+            settings.customPlaylistNameStyle,
+            playlistNames,
+          )
+          appendLog(`AI 按「${PLAYLIST_NAME_STYLE_LABELS[settings.playlistNameStyle]}」风格生成了歌单名建议`)
+        }
+      }
+      dimension = { ...dimension, playlistNames }
+
+      const runSettings: Settings = {
+        ...settings,
+        dimensions: settings.dimensions.map((item) =>
+          item.key === dimension.key ? dimension : { ...item, enabled: false },
+        ),
+      }
+      const runKey = classificationRunKey(selected.id, songs, dimension, settings)
+      const canReuseResults =
+        !forceReclassify && classifiedRunKeyRef.current === runKey && outcomes.size === songs.length
+      setActiveDimension(dimension)
+      if (canReuseResults) {
+        const previousNames = activeDimension?.key === dimension.key
+          ? activeDimension.playlistNames ?? {}
+          : {}
+        setDestinations((previous) => {
+          const next = { ...previous }
+          for (const category of dimension.categories) {
+            const choice = next[category]
+            const previousSuggestion = previousNames[category] ?? category
+            if (choice?.kind === 'new' && choice.playlistName === previousSuggestion) {
+              next[category] = { kind: 'new', playlistName: playlistNames[category] ?? category }
+            }
+          }
+          return next
+        })
+        setProgress({
+          done: songs.length,
+          total: songs.length,
+          cached: 0,
+          failed: 0,
+          message: '分类结果未改变，仅更新歌单名建议',
+        })
+        appendLog('沿用现有分类结果，仅更新歌单名建议')
+      } else {
+        setDestinations({})
+        setOutcomes(new Map())
+        const result = await classifySongs(songs, runSettings, {
+          signal: controller.signal,
+          onProgress: (p) => setProgress(p),
+        })
+        setOutcomes(result.outcomes)
+        classifiedRunKeyRef.current = result.failedBatches === 0 ? runKey : null
+        if (result.failedBatches > 0) {
+          appendLog(`注意：有 ${result.failedBatches} 首未能得到分类结果`)
+        }
+      }
+      setCachedCount(await cacheSize())
       appendLog('分类结束')
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -164,7 +324,7 @@ export default function App() {
       abortRef.current = null
       setBusy(false)
     }
-  }, [songs, settings, appendLog])
+  }, [songs, selected, settings, regenerateGenreScheme, outcomes, activeDimension, appendLog])
 
   const stopClassify = useCallback(() => {
     abortRef.current?.abort()
@@ -178,7 +338,7 @@ export default function App() {
     setError(null)
     setApplyLog([])
     try {
-      const dimension = settings.dimensions.find((item) => item.enabled)
+      const dimension = activeDimension ?? settings.dimensions.find((item) => item.enabled)
       if (!dimension) throw new Error('请先选择一个分类维度。')
 
       const grouped = groupByDimension(songs, outcomes, dimension)
@@ -211,7 +371,7 @@ export default function App() {
     } finally {
       setBusy(false)
     }
-  }, [songs, outcomes, settings.dimensions, playlists, destinations, appendLog])
+  }, [songs, outcomes, settings.dimensions, activeDimension, playlists, destinations, appendLog])
 
   const applyPlan = useCallback(async () => {
     setBusy(true)
@@ -255,15 +415,52 @@ export default function App() {
     [],
   )
 
+  const mergeCategory = useCallback((source: string, target: string) => {
+    if (!activeDimension || source === target) return
+    const dimensionKey = activeDimension.key
+    setOutcomes((previous) => {
+      const next = new Map(previous)
+      for (const [songId, outcome] of next) {
+        if (outcome[dimensionKey]?.category === source) {
+          next.set(songId, {
+            ...outcome,
+            [dimensionKey]: { category: target, source: 'manual' },
+          })
+        }
+      }
+      return next
+    })
+    setActiveDimension((previous) => {
+      if (!previous || previous.key !== dimensionKey) return previous
+      const categoryHints = { ...previous.categoryHints }
+      const playlistNames = { ...previous.playlistNames }
+      delete categoryHints[source]
+      delete playlistNames[source]
+      return {
+        ...previous,
+        categories: previous.categories.filter((category) => category !== source),
+        categoryHints,
+        playlistNames,
+      }
+    })
+    setDestinations((previous) => {
+      const next = { ...previous }
+      if (!next[target] && next[source]) next[target] = next[source]
+      delete next[source]
+      return next
+    })
+    setPlans([])
+  }, [activeDimension])
+
   const currentIndex = STEP_ORDER.indexOf(step)
   const canGo = useMemo(
     () => ({
       select: profile != null,
       configure: songs.length > 0,
       classify: songs.length > 0,
-      preview: outcomes.size > 0,
+      preview: !busy && outcomes.size > 0,
     }),
-    [profile, songs.length, outcomes.size],
+    [profile, songs.length, outcomes.size, busy],
   )
 
   return (
@@ -326,6 +523,8 @@ export default function App() {
           onNext={() => void startClassify()}
           onBack={() => setStep('select')}
           songCount={songs.length}
+          regenerateGenreScheme={regenerateGenreScheme}
+          onRegenerateGenreSchemeChange={setRegenerateGenreScheme}
         />
       )}
 
@@ -336,10 +535,10 @@ export default function App() {
           log={log}
           total={songs.length}
           onStop={stopClassify}
-          onRetry={() => void startClassify()}
+          onRetry={() => void startClassify(true)}
           onNext={() => {
             setStep('preview')
-            void buildPlan({})
+            void buildPlan()
           }}
         />
       )}
@@ -348,7 +547,14 @@ export default function App() {
         <PreviewStep
           songs={songs}
           outcomes={outcomes}
-          settings={settings}
+          settings={{
+            ...settings,
+            dimensions: settings.dimensions.map((dimension) =>
+              activeDimension?.key === dimension.key
+                ? activeDimension
+                : { ...dimension, enabled: false },
+            ),
+          }}
           playlists={playlists}
           destinations={destinations}
           plans={plans}
@@ -359,6 +565,7 @@ export default function App() {
             setPlans([])
           }}
           onSongCategoryChange={updateSongCategory}
+          onMergeCategory={mergeCategory}
           onRebuildPlan={() => void buildPlan(destinations)}
           onApply={() => void applyPlan()}
           onBack={() => setStep('classify')}

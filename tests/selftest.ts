@@ -8,7 +8,8 @@
  */
 
 import { decadeOf, guessLanguage, looksInstrumental } from '@/lib/classifier/rules'
-import { extractJson } from '@/lib/classifier/llm'
+import { extractJson, sampleGenreSongs } from '@/lib/classifier/llm'
+import { cacheKeyFor, playlistNameCacheKeyFor, DEFAULT_SETTINGS } from '@/lib/store'
 import { defaultDestinationFor } from '@/lib/writer'
 
 let pass = 0
@@ -59,7 +60,49 @@ console.log('— looksInstrumental —')
 eq('OST 命中', looksInstrumental(song('Main Theme OST', 'X')), true)
 eq('普通歌不误判', looksInstrumental(song('晴天', '周杰伦')), false)
 
-console.log('— extractJson：模型返回格式最不可控，容错必须稳 —')
+console.log('— 动态曲风分类样本 —')
+const sampleList = Array.from({ length: 10 }, (_, id) => ({ ...song(`track-${id}`, 'artist'), id }))
+eq('均匀抽样覆盖歌单首尾', sampleGenreSongs(sampleList, 4).map((item) => item.id), [0, 3, 6, 9])
+eq('不超过上限时保留全部歌曲', sampleGenreSongs(sampleList, 20).length, 10)
+
+console.log('— 分类缓存隔离 —')
+const genreDimension = {
+  key: 'genre' as const,
+  label: '曲风',
+  enabled: true,
+  categories: ['流行'],
+  categoryHints: { 流行: '主流流行音乐' },
+}
+eq(
+  '相同配置得到相同缓存键',
+  cacheKeyFor('https://api.example.com/v1', 'model-a', 1, [genreDimension]) ===
+    cacheKeyFor('https://api.example.com/v1', 'model-a', 1, [genreDimension]),
+  true,
+)
+eq(
+  '分类说明变化时隔离旧缓存',
+  cacheKeyFor('https://api.example.com/v1', 'model-a', 1, [genreDimension]) !==
+    cacheKeyFor('https://api.example.com/v1', 'model-a', 1, [
+      { ...genreDimension, categoryHints: { 流行: '另一套定义' } },
+    ]),
+  true,
+)
+eq(
+  '歌单名变化不影响分类缓存',
+  cacheKeyFor('https://api.example.com/v1', 'model-a', 1, [genreDimension]) ===
+    cacheKeyFor('https://api.example.com/v1', 'model-a', 1, [
+      { ...genreDimension, playlistNames: { 流行: '雨中唱片' } },
+    ]),
+  true,
+)
+eq('默认命名风格为简洁直白', DEFAULT_SETTINGS.playlistNameStyle, 'concise')
+const nameKey = (style: 'concise' | 'custom', custom: string) =>
+  playlistNameCacheKeyFor('https://api.example.com/v1', 'model-a', genreDimension, style, custom)
+eq('相同命名配置复用名称缓存', nameKey('custom', '季节意象') === nameKey('custom', '季节意象'), true)
+eq('切换命名风格隔离名称缓存', nameKey('concise', '') !== nameKey('custom', '季节意象'), true)
+eq('修改自定义描述隔离名称缓存', nameKey('custom', '季节意象') !== nameKey('custom', '复古唱片'), true)
+
+console.log('— extractJson：模型返回格式容错 —')
 eq('纯 JSON', extractJson('{"results":[{"id":1,"mood":"治愈"}]}'), {
   results: [{ id: 1, mood: '治愈' }],
 })

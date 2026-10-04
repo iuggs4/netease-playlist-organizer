@@ -1,9 +1,10 @@
 /** 设置项与分类缓存的本地持久化。 */
 
-import type { Dimension, DimensionKey } from '@/lib/types'
+import type { Dimension, DimensionKey, PlaylistNameStyle } from '@/lib/types'
 
 const SETTINGS_KEY = 'settings:v1'
 const CACHE_KEY = 'classify-cache:v1'
+const PLAYLIST_NAME_CACHE_KEY = 'playlist-name-cache:v1'
 
 export interface Settings {
   /** OpenAI 兼容接口，例如 https://api.deepseek.com/v1 */
@@ -11,6 +12,10 @@ export interface Settings {
   apiKey: string
   model: string
   dimensions: Dimension[]
+  /** 曲风动态分类的最大类目数 */
+  maxGenreCategories: number
+  playlistNameStyle: PlaylistNameStyle
+  customPlaylistNameStyle: string
   /** 每批送给模型的歌曲数 */
   batchSize: number
   /** 并发请求数 */
@@ -30,17 +35,7 @@ export const DEFAULT_DIMENSIONS: Dimension[] = [
     key: 'genre',
     label: '曲风',
     enabled: true,
-    categories: ['流行与节奏', '摇滚与原声', '电子与器乐'],
-    categoryHints: {
-      '流行与节奏': '流行、R&B、Soul、说唱、舞曲等以节奏和主流歌曲表达为主的作品',
-      '摇滚与原声': '摇滚、独立、朋克、金属、民谣、乡村及原声演奏等',
-      '电子与器乐': '电子、EDM、氛围、古典、爵士、纯器乐及影视/游戏配乐等',
-    },
-    playlistNames: {
-      '流行与节奏': '暮色中的唱片',
-      '摇滚与原声': '潮声与旧弦',
-      '电子与器乐': '无人的月台',
-    },
+    categories: [],
   },
   {
     key: 'language',
@@ -56,24 +51,21 @@ export const DEFAULT_DIMENSIONS: Dimension[] = [
   },
 ]
 
-const LEGACY_DEFAULT_GENRE_CATEGORIES = [
-  '流行', '摇滚', '民谣', '电子', '说唱', '国风', 'ACG', 'R&B', '爵士', '古典', '纯音乐',
-]
-
 function normalizeDimensions(savedDimensions?: Dimension[]): Dimension[] {
   const merged = DEFAULT_DIMENSIONS.map((fallback) => {
     const saved = savedDimensions?.find((d) => d.key === fallback.key)
     if (!saved) return { ...fallback }
 
-    const isUncustomizedLegacyGenre =
-      saved.key === 'genre' &&
-      saved.categories.length === LEGACY_DEFAULT_GENRE_CATEGORIES.length &&
-      saved.categories.every((category, index) => category === LEGACY_DEFAULT_GENRE_CATEGORIES[index])
+    if (saved.key === 'genre') {
+      // 曲风类别现在由当前来源歌单动态生成，不保留旧版固定分类。
+      return { ...fallback, ...saved, categories: [], categoryHints: undefined, playlistNames: undefined }
+    }
 
     return {
       ...fallback,
       ...saved,
-      categories: isUncustomizedLegacyGenre ? fallback.categories : saved.categories,
+      categories: saved.categories,
+      categoryHints: { ...fallback.categoryHints, ...saved.categoryHints },
       playlistNames: { ...fallback.playlistNames, ...saved.playlistNames },
     }
   })
@@ -90,11 +82,22 @@ function normalizeDimensions(savedDimensions?: Dimension[]): Dimension[] {
   }))
 }
 
+const PLAYLIST_NAME_STYLES: PlaylistNameStyle[] = [
+  'japanese-literary', 'concise', 'retro-record', 'cinematic', 'custom',
+]
+
+function isPlaylistNameStyle(value: unknown): value is PlaylistNameStyle {
+  return typeof value === 'string' && PLAYLIST_NAME_STYLES.includes(value as PlaylistNameStyle)
+}
+
 export const DEFAULT_SETTINGS: Settings = {
   baseUrl: 'https://api.deepseek.com/v1',
   apiKey: '',
   model: 'deepseek-chat',
   dimensions: DEFAULT_DIMENSIONS,
+  maxGenreCategories: 3,
+  playlistNameStyle: 'concise',
+  customPlaylistNameStyle: '',
   batchSize: 20,
   concurrency: 3,
   dryRun: true,
@@ -106,6 +109,14 @@ export async function loadSettings(): Promise<Settings> {
   return {
     ...DEFAULT_SETTINGS,
     ...saved,
+    maxGenreCategories: Math.min(
+      8,
+      Math.max(2, Math.round(Number(saved?.maxGenreCategories) || DEFAULT_SETTINGS.maxGenreCategories)),
+    ),
+    playlistNameStyle: isPlaylistNameStyle(saved?.playlistNameStyle)
+      ? saved.playlistNameStyle
+      : DEFAULT_SETTINGS.playlistNameStyle,
+    customPlaylistNameStyle: String(saved?.customPlaylistNameStyle ?? '').slice(0, 120),
     dimensions: normalizeDimensions(saved?.dimensions),
   }
 }
@@ -118,9 +129,27 @@ export async function saveSettings(s: Settings): Promise<void> {
 export type CachedClass = Partial<Record<DimensionKey, { category: string; source: string }>>
 type CacheShape = Record<string, CachedClass>
 
-/** 缓存 key 含模型名 —— 换模型后必须重新分类，不能复用旧结果。 */
-export function cacheKeyFor(model: string, songId: number): string {
-  return `${model}|${songId}`
+/** 缓存按模型、接口地址和分类定义隔离，修改提示或类别后不会误用旧结果。 */
+export function cacheKeyFor(
+  baseUrl: string,
+  model: string,
+  songId: number,
+  dimensions: Dimension[],
+): string {
+  const schema = JSON.stringify(
+    dimensions.map((dimension) => ({
+      key: dimension.key,
+      categories: dimension.categories,
+      categoryHints: dimension.categoryHints ?? {},
+    })),
+  )
+  const input = `classifier-v2|${baseUrl}|${model}|${schema}`
+  let hash = 0x811c9dc5
+  for (let index = 0; index < input.length; index++) {
+    hash ^= input.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return `v2|${(hash >>> 0).toString(16)}|${songId}`
 }
 
 export async function loadCache(): Promise<CacheShape> {
@@ -138,5 +167,95 @@ export async function clearCache(): Promise<void> {
 }
 
 export async function cacheSize(): Promise<number> {
-  return Object.keys(await loadCache()).length
+  return Object.keys(await loadCache()).filter((key) => key.startsWith('v2|')).length
+}
+
+const GENRE_SCHEMES_KEY = 'genre-schemes:v1'
+type GenreSchemes = Record<string, { model: string; maxCategories: number; dimension: Dimension }>
+
+function genreSchemeKey(playlistId: number, model: string, maxCategories: number): string {
+  return `${playlistId}|${model}|${maxCategories}`
+}
+
+export function playlistNameCacheKeyFor(
+  baseUrl: string,
+  model: string,
+  dimension: Dimension,
+  style: PlaylistNameStyle,
+  customStyle: string,
+): string {
+  const input = JSON.stringify({
+    version: 'playlist-name-v1',
+    baseUrl,
+    model,
+    key: dimension.key,
+    categories: dimension.categories,
+    categoryHints: dimension.categoryHints ?? {},
+    style,
+    customStyle: style === 'custom' ? customStyle.trim() : '',
+  })
+  let hash = 0x811c9dc5
+  for (let index = 0; index < input.length; index++) {
+    hash ^= input.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16)
+}
+
+export async function loadPlaylistNameSuggestions(
+  baseUrl: string,
+  model: string,
+  dimension: Dimension,
+  style: PlaylistNameStyle,
+  customStyle: string,
+): Promise<Record<string, string> | null> {
+  const stored = await chrome.storage.local.get(PLAYLIST_NAME_CACHE_KEY)
+  const cache = (stored[PLAYLIST_NAME_CACHE_KEY] as Record<string, Record<string, string>> | undefined) ?? {}
+  const names = cache[playlistNameCacheKeyFor(baseUrl, model, dimension, style, customStyle)]
+  if (!names || dimension.categories.some((category) => !names[category])) return null
+  return names
+}
+
+export async function savePlaylistNameSuggestions(
+  baseUrl: string,
+  model: string,
+  dimension: Dimension,
+  style: PlaylistNameStyle,
+  customStyle: string,
+  names: Record<string, string>,
+): Promise<void> {
+  const stored = await chrome.storage.local.get(PLAYLIST_NAME_CACHE_KEY)
+  const cache = (stored[PLAYLIST_NAME_CACHE_KEY] as Record<string, Record<string, string>> | undefined) ?? {}
+  const key = playlistNameCacheKeyFor(baseUrl, model, dimension, style, customStyle)
+  await chrome.storage.local.set({ [PLAYLIST_NAME_CACHE_KEY]: { ...cache, [key]: names } })
+}
+
+export async function loadGenreScheme(
+  playlistId: number,
+  model: string,
+  maxCategories: number,
+): Promise<Dimension | null> {
+  const stored = await chrome.storage.local.get(GENRE_SCHEMES_KEY)
+  const schemes = (stored[GENRE_SCHEMES_KEY] as GenreSchemes | undefined) ?? {}
+  const entry = schemes[genreSchemeKey(playlistId, model, maxCategories)]
+  if (!entry || entry.dimension.categories.length === 0) return null
+  if (entry.dimension.categories.length > maxCategories) return null
+  return entry.dimension
+}
+
+export async function saveGenreScheme(
+  playlistId: number,
+  model: string,
+  maxCategories: number,
+  dimension: Dimension,
+): Promise<void> {
+  const stored = await chrome.storage.local.get(GENRE_SCHEMES_KEY)
+  const schemes = (stored[GENRE_SCHEMES_KEY] as GenreSchemes | undefined) ?? {}
+  const key = genreSchemeKey(playlistId, model, maxCategories)
+  await chrome.storage.local.set({
+    [GENRE_SCHEMES_KEY]: {
+      ...schemes,
+      [key]: { model, maxCategories, dimension },
+    },
+  })
 }

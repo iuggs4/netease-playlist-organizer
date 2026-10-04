@@ -39,6 +39,13 @@ export interface SongClass {
 /** 分类维度标识 */
 export type DimensionKey = 'mood' | 'genre' | 'language' | 'era'
 
+export type PlaylistNameStyle =
+  | 'japanese-literary'
+  | 'concise'
+  | 'retro-record'
+  | 'cinematic'
+  | 'custom'
+
 export interface Dimension {
   key: DimensionKey
   /** 维度名，会拼进歌单名，例如「情绪 · 深夜」 */

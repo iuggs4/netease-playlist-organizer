@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { DimensionKey, PlaylistBrief, Song } from '@/lib/types'
 import type { Settings } from '@/lib/store'
 import type { SongOutcome } from '@/lib/classifier/llm'
@@ -15,6 +16,7 @@ interface Props {
   applyLog: string[]
   onDestinationChange: (category: string, choice: DestinationChoice) => void
   onSongCategoryChange: (songId: number, dim: DimensionKey, category: string) => void
+  onMergeCategory: (source: string, target: string) => void
   onRebuildPlan: () => void
   onApply: () => void
   onBack: () => void
@@ -37,10 +39,12 @@ export default function PreviewStep({
   applyLog,
   onDestinationChange,
   onSongCategoryChange,
+  onMergeCategory,
   onRebuildPlan,
   onApply,
   onBack,
 }: Props) {
+  const [mergeTargets, setMergeTargets] = useState<Record<string, string>>({})
   const dim = settings.dimensions.find((dimension) => dimension.enabled)
   const availableTargets = playlists.filter((playlist) => playlist.specialType !== 5)
   const hasChanges = plans.some((plan) => plan.action !== 'none')
@@ -116,6 +120,49 @@ export default function PreviewStep({
               <h2 style={{ margin: 0 }}>{category}</h2>
               <span className="muted small">{list.length} 首</span>
             </div>
+            {dim.categoryHints?.[category] && (
+              <p className="muted small" style={{ margin: '5px 0 0' }}>
+                分类范围：{dim.categoryHints[category]}
+              </p>
+            )}
+            {dim.playlistNames?.[category] && (
+              <p className="muted small" style={{ margin: '3px 0 0' }}>
+                歌单名建议：{dim.playlistNames[category]}
+              </p>
+            )}
+            {dim.categories.length > 1 && (
+              <div className="row" style={{ marginTop: 8 }}>
+                <span className="muted small">合并此类到</span>
+                <select
+                  value={mergeTargets[category] ?? ''}
+                  onChange={(event) =>
+                    setMergeTargets((previous) => ({ ...previous, [category]: event.target.value }))
+                  }
+                >
+                  <option value="">保持独立</option>
+                  {dim.categories.filter((target) => target !== category).map((target) => (
+                    <option key={target} value={target}>{target}</option>
+                  ))}
+                </select>
+                <button
+                  className="ghost"
+                  disabled={!mergeTargets[category]}
+                  onClick={() => {
+                    const target = mergeTargets[category]
+                    if (target) {
+                      onMergeCategory(category, target)
+                      setMergeTargets((previous) => {
+                        const next = { ...previous }
+                        delete next[category]
+                        return next
+                      })
+                    }
+                  }}
+                >
+                  合并
+                </button>
+              </div>
+            )}
 
             <div className="grid2" style={{ marginTop: 10 }}>
               <div>

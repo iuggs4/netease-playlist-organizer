@@ -88,7 +88,8 @@ export async function classifySongs(
   const pending: Song[] = []
 
   for (const song of songs) {
-    const hit = cache[cacheKeyFor(settings.model, song.id)]
+    const cacheKey = cacheKeyFor(settings.baseUrl, settings.model, song.id, dims)
+    const hit = cache[cacheKey]
     const merged: SongOutcome = hit ? fromCache(hit) : {}
 
     // 年代永远由规则直出，既准又零成本，不缓存也不问模型
@@ -161,7 +162,7 @@ export async function classifySongs(
     for (const song of pending) {
       const entry = outcomes.get(song.id)
       if (entry && Object.keys(entry).length > 0) {
-        cachePatch[cacheKeyFor(settings.model, song.id)] = toCache(entry)
+        cachePatch[cacheKeyFor(settings.baseUrl, settings.model, song.id, dims)] = toCache(entry)
       }
     }
     if (Object.keys(cachePatch).length > 0) {
