@@ -7,10 +7,11 @@
  *   npm run selftest
  */
 
-import { artistNames, decadeOf, guessLanguage, looksInstrumental } from '@/lib/classifier/rules'
+import { artistNames, artistSongCounts, decadeOf, guessLanguage, looksInstrumental } from '@/lib/classifier/rules'
 import { extractJson, generatePlaylistNameSuggestions, needsLlm, sampleGenreSongs } from '@/lib/classifier/llm'
 import { categoriesOf, classifySongs, groupByDimension, replaceArtistCategory } from '@/lib/classifier'
-import { cacheKeyFor, normalizeDimensions, playlistNameCacheKeyFor, DEFAULT_SETTINGS, type CachedClass } from '@/lib/store'
+import { cacheKeyFor, loadSettings, normalizeDimensions, normalizeMinArtistSongs, playlistNameCacheKeyFor, DEFAULT_SETTINGS, type CachedClass } from '@/lib/store'
+import { selftestArtistPlaylists } from './artist-playlists'
 import { applyWritePlan, buildWritePlan, defaultDestinationFor, type CategoryWriteGroup } from '@/lib/writer'
 import { getUserPlaylists } from '@/lib/netease'
 import type { Dimension, PlaylistBrief } from '@/lib/types'
@@ -155,7 +156,7 @@ const artistDimension: Dimension = {
   key: 'artist', label: '歌手', enabled: true,
   categories: [...new Set(artistSongs.flatMap(artistNames))],
 }
-const artistSettings = { ...DEFAULT_SETTINGS, dimensions: [artistDimension], apiKey: '', baseUrl: 'invalid-model-url' }
+const artistSettings = { ...DEFAULT_SETTINGS, minArtistSongs: 1, dimensions: [artistDimension], apiKey: '', baseUrl: 'invalid-model-url' }
 const artistResult = await classifySongs(artistSongs, artistSettings)
 eq('独唱只有一个归属', artistResult.outcomes.get(1)?.artist?.category, ['A'])
 eq('合唱包含每位歌手，去空并去重', artistResult.outcomes.get(2)?.artist?.category, ['A', 'B'])
@@ -178,6 +179,38 @@ eq('长歌手名和自定义风格也不调用 AI', await generatePlaylistNameSu
   dimension: { ...artistDimension, categories: [longArtist] }, style: 'custom', customStyle: '',
 }), { [longArtist]: longArtist })
 
+console.log('— 歌手数量门槛：来源不同歌曲数，包含边界 —')
+const thresholdSongs = Array.from({ length: 11 }, (_, index) => ({
+  ...song(`门槛歌曲 ${index + 1}`, '十一'), id: 500 + index,
+  artists: [...(index < 9 ? ['九'] : []), ...(index < 10 ? ['十'] : []), '十一', ...(index === 10 ? ['合唱嘉宾', '合唱嘉宾', ' '] : [])],
+}))
+const repeatedSongs = [...thresholdSongs, thresholdSongs[0], thresholdSongs[10]]
+eq('重复歌曲与重复歌手不增加计数', [...artistSongCounts(repeatedSongs)], [['九', 9], ['十', 10], ['十一', 11], ['合唱嘉宾', 1]])
+const thresholdDimension: Dimension = { ...artistDimension, categories: ['十', '十一'] }
+const thresholdResult = await classifySongs(repeatedSongs, { ...artistSettings, minArtistSongs: 10, dimensions: [thresholdDimension] })
+eq('9 首排除，10 和 11 首保留', thresholdResult.outcomes.get(500)?.artist?.category, ['十', '十一'])
+eq('未达门槛的合唱嘉宾排除，另一位歌手保留', thresholdResult.outcomes.get(510)?.artist?.category, ['十一'])
+const thresholdGroups = groupByDimension(repeatedSongs, thresholdResult.outcomes, thresholdDimension)
+eq('预览歌曲数量按 ID 去重', [...thresholdGroups].map(([artist, list]) => [artist, list.length]), [['十', 10], ['十一', 11]])
+const higherThreshold = await classifySongs(thresholdSongs, { ...artistSettings, minArtistSongs: 11 })
+eq('修改门槛后重新计算归属', higherThreshold.outcomes.get(500)?.artist?.category, ['十一'])
+const manualFiltered = new Map(thresholdResult.outcomes)
+manualFiltered.set(500, { artist: { category: replaceArtistCategory(['十'], '十', '九'), source: 'manual' } })
+eq('共享分组不会恢复被门槛移除的歌手分类', groupByDimension(thresholdSongs, manualFiltered, thresholdDimension).has('九'), false)
+eq('合并到达标歌手保持归属去重', replaceArtistCategory(['十', '十一'], '十', '十一'), ['十一'])
+eq('默认门槛包含10首', DEFAULT_SETTINGS.minArtistSongs, 10)
+eq('合法门槛1保留', normalizeMinArtistSongs(1), 1)
+eq('非法门槛与旧设置使用默认10', [undefined, 0, -1, 1.5, NaN, Infinity, '10'].map(normalizeMinArtistSongs), [10, 10, 10, 10, 10, 10, 10])
+
+console.log('— 只读扫描与歌单内容配对 —')
+try {
+  await selftestArtistPlaylists()
+  eq('内容扫描、严格配对、歧义与刷新断言', true, true)
+} catch (error) {
+  console.error(error)
+  eq('内容扫描、严格配对、歧义与刷新断言', false, true)
+}
+
 console.log('— 新旧设置兼容 —')
 eq('新安装默认选择歌手', normalizeDimensions().find((item) => item.enabled)?.key, 'artist')
 eq('旧用户的年代选择保留', normalizeDimensions([
@@ -197,10 +230,11 @@ const legacyCache: Record<string, CachedClass> = {
     genre: { category: '流行', source: 'llm' },
   },
 }
+let savedMinimum: unknown = undefined
 Object.defineProperty(globalThis, 'chrome', {
   configurable: true,
   value: {
-    storage: { local: { get: async () => ({ 'classify-cache:v1': legacyCache }) } },
+    storage: { local: { get: async () => ({ 'classify-cache:v1': legacyCache, 'settings:v1': { minArtistSongs: savedMinimum, dimensions: [genreDimension] } }) } },
     tabs: {
       query: async () => [{ id: 1 }],
       sendMessage: async (_tabId: number, message: NcmRequestMessage) => {
@@ -232,6 +266,17 @@ Object.defineProperty(globalThis, 'chrome', {
     },
   },
 })
+eq('旧设置自动补入门槛10', (await loadSettings()).minArtistSongs, 10)
+savedMinimum = 20
+eq('已保存的门槛保留', (await loadSettings()).minArtistSongs, 20)
+eq('加载新设置保留旧分类选择', (await loadSettings()).dimensions.find((item) => item.enabled)?.key, 'genre')
+mockTracks.set(42, new Set(thresholdSongs.slice(0, 9).map((item) => item.id)))
+const thresholdPlan = await buildWritePlan({
+  groups: [{ dimension: 'artist', dimensionLabel: '歌手', category: '十', displayTitle: '十', songs: thresholdGroups.get('十')!, destination: { kind: 'existing', playlistId: 42 } }],
+  existingPlaylists: mockPlaylists,
+})
+eq('来源有10首、目标已有9首时仍达标并只追加1首', thresholdPlan[0].toAdd, [509])
+mockTracks.set(42, new Set([1]))
 const legacyResult = await classifySongs([artistSongs[0]], { ...DEFAULT_SETTINGS, dimensions: [genreDimension] })
 eq('旧模型缓存保留单值结果', legacyResult.outcomes.get(1)?.genre?.category, '流行')
 const sharedGroups: CategoryWriteGroup[] = [...artistGroups].map(([category, songs]) => ({

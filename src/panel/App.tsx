@@ -20,7 +20,8 @@ import {
   pickLikedPlaylist,
 } from '@/lib/netease'
 import { categoriesOf, classifySongs, groupByDimension, replaceArtistCategory, type ClassifyProgress } from '@/lib/classifier'
-import { artistNames } from '@/lib/classifier/rules'
+import { artistSongCounts } from '@/lib/classifier/rules'
+import { resolveArtistDestination, scanArtistPlaylists, type ArtistDestinationResolution } from '@/lib/artist-playlists'
 import {
   discoverGenreDimension,
   generatePlaylistNameSuggestions,
@@ -64,7 +65,7 @@ function classificationRunKey(
   playlistId: number,
   songs: Song[],
   dimension: Dimension,
-  settings: Pick<Settings, 'baseUrl' | 'model'>,
+  settings: Pick<Settings, 'baseUrl' | 'model' | 'minArtistSongs'>,
 ): string {
   return JSON.stringify({
     version: 'classifier-v2',
@@ -79,6 +80,7 @@ function classificationRunKey(
     baseUrl: settings.baseUrl,
     model: settings.model,
     key: dimension.key,
+    minArtistSongs: dimension.key === 'artist' ? settings.minArtistSongs : undefined,
     categories: dimension.categories,
     categoryHints: dimension.categoryHints ?? {},
   })
@@ -106,10 +108,32 @@ export default function App() {
 
   const [plans, setPlans] = useState<CategoryPlan[]>([])
   const [destinations, setDestinations] = useState<Record<string, DestinationChoice>>({})
+  const [artistResolutions, setArtistResolutions] = useState<Record<string, ArtistDestinationResolution>>({})
+  const [scanWarnings, setScanWarnings] = useState<string[]>([])
+  const [planMessage, setPlanMessage] = useState('')
   const [applyLog, setApplyLog] = useState<string[]>([])
 
   const abortRef = useRef<AbortController | null>(null)
   const classifiedRunKeyRef = useRef<string | null>(null)
+  const manualDestinationsRef = useRef<Record<string, DestinationChoice>>({})
+
+  const invalidateClassification = useCallback(() => {
+    classifiedRunKeyRef.current = null
+    manualDestinationsRef.current = {}
+    setActiveDimension(null)
+    setOutcomes(new Map())
+    setDestinations({})
+    setArtistResolutions({})
+    setPlans([])
+    setProgress(null)
+    setScanWarnings([])
+    setPlanMessage('')
+  }, [])
+
+  const updateSettings = (next: Settings) => {
+    if (next.minArtistSongs !== settings.minArtistSongs) invalidateClassification()
+    setSettings(next)
+  }
 
   const appendLog = useCallback((line: string) => {
     setLog((prev) => [...prev.slice(-199), line])
@@ -156,6 +180,8 @@ export default function App() {
   /** 拉取所选歌单的全部歌曲详情 */
   const loadSongs = useCallback(async () => {
     if (!selected) return
+    invalidateClassification()
+    setSongs([])
     setBusy(true)
     setError(null)
     setSongMsg('读取歌曲列表…')
@@ -175,7 +201,7 @@ export default function App() {
     } finally {
       setBusy(false)
     }
-  }, [selected, appendLog])
+  }, [selected, appendLog, invalidateClassification])
 
   const startClassify = useCallback(async (forceReclassify = false) => {
     if (songs.length === 0) return
@@ -197,6 +223,9 @@ export default function App() {
     setLog([])
     setProgress(null)
     setPlans([])
+    setArtistResolutions({})
+    setScanWarnings([])
+    setPlanMessage('')
     setBusy(true)
     try {
       if (configuredDimension.key !== 'artist') {
@@ -210,8 +239,9 @@ export default function App() {
 
       let dimension = configuredDimension
       if (configuredDimension.key === 'artist') {
-        dimension = { ...configuredDimension, categories: [...new Set(songs.flatMap(artistNames))] }
-        appendLog(`按歌曲资料中的 ${dimension.categories.length} 位歌手分类，无需 AI`)
+        const counts = artistSongCounts(songs)
+        dimension = { ...configuredDimension, categories: [...counts].filter(([, count]) => count >= settings.minArtistSongs).map(([artist]) => artist) }
+        appendLog(`至少 ${settings.minArtistSongs} 首：保留 ${dimension.categories.length} 位歌手，跳过 ${counts.size - dimension.categories.length} 位，无需 AI`)
       }
       if (configuredDimension.key === 'genre') {
         setProgress({ done: 0, total: songs.length, cached: 0, failed: 0, message: '正在分析当前歌单的曲风分布…' })
@@ -313,6 +343,7 @@ export default function App() {
         })
         appendLog('沿用现有分类结果，仅更新歌单名建议')
       } else {
+        manualDestinationsRef.current = {}
         setDestinations({})
         setOutcomes(new Map())
         const result = await classifySongs(songs, runSettings, {
@@ -340,33 +371,50 @@ export default function App() {
     appendLog('已请求停止')
   }, [appendLog])
 
-  const buildPlan = useCallback(async (
-    selectedDestinations: Record<string, DestinationChoice> = destinations,
-  ) => {
+  const buildPlan = useCallback(async () => {
     setBusy(true)
     setError(null)
     setApplyLog([])
+    setPlans([])
+    setScanWarnings([])
+    setPlanMessage('正在刷新目标歌单…')
     try {
       const dimension = activeDimension ?? settings.dimensions.find((item) => item.enabled)
       if (!dimension) throw new Error('请先选择一个分类维度。')
       if (!profile) throw new Error('请先重新检测网易云登录状态。')
       const currentPlaylists = await getUserPlaylists(profile.userId)
       setPlaylists(currentPlaylists)
-      const writablePlaylists = currentPlaylists.filter((playlist) => playlist.userId === profile.userId)
+      const writablePlaylists = currentPlaylists.filter((playlist) => playlist.userId === profile.userId && playlist.specialType !== 5)
 
       const grouped = groupByDimension(songs, outcomes, dimension)
+      const evidence = dimension.key === 'artist' && [...grouped.values()].some((list) => list.length > 0)
+        ? await scanArtistPlaylists(writablePlaylists, profile.userId, setPlanMessage)
+        : []
+      setScanWarnings(evidence.filter((item) => item.error).map((item) => `《${item.playlistName}》：${item.error}`))
       const groups: Parameters<typeof buildWritePlan>[0]['groups'] = []
       const resolvedDestinations: Record<string, DestinationChoice> = {}
+      const resolutions: Record<string, ArtistDestinationResolution> = {}
+      const unresolved: string[] = []
       for (const category of dimension.categories) {
+        const categorySongs = grouped.get(category) ?? []
+        if (categorySongs.length === 0) continue
         const displayTitle = dimension.playlistNames?.[category] ?? category
-        let destination =
-          selectedDestinations[category] ?? defaultDestinationFor(displayTitle, writablePlaylists)
-        if (destination.kind === 'new') {
+        let destination: DestinationChoice
+        if (dimension.key === 'artist') {
+          const resolution = resolveArtistDestination(category, displayTitle, writablePlaylists, evidence, manualDestinationsRef.current[category])
+          resolutions[category] = resolution
+          if (!resolution.destination) {
+            unresolved.push(category)
+            continue
+          }
+          destination = resolution.destination
+        } else {
+          destination = destinations[category] ?? defaultDestinationFor(displayTitle, writablePlaylists)
+        }
+        if (dimension.key !== 'artist' && destination.kind === 'new') {
           destination = defaultDestinationFor(destination.playlistName.trim(), writablePlaylists)
         }
         resolvedDestinations[category] = destination
-        const categorySongs = grouped.get(category) ?? []
-        if (categorySongs.length === 0) continue
         groups.push({
           dimension: dimension.key,
           dimensionLabel: dimension.label,
@@ -376,8 +424,13 @@ export default function App() {
           destination,
         })
       }
+      setArtistResolutions(resolutions)
       setDestinations(resolvedDestinations)
+      if (unresolved.length > 0) {
+        throw new Error(`请先为「${unresolved.join('、')}」明确选择已有歌单或新建歌单，再重新计算计划。`)
+      }
       appendLog('正在读取目标歌单，计算追加计划…')
+      setPlanMessage('正在计算目标歌单中尚未包含的歌曲…')
       const built = await buildWritePlan({ groups, existingPlaylists: writablePlaylists })
       setPlans(built)
       appendLog(`生成 ${built.length} 条导入计划`)
@@ -385,6 +438,7 @@ export default function App() {
       setError(err instanceof Error ? err.message : String(err))
       setPlans([])
     } finally {
+      setPlanMessage('')
       setBusy(false)
     }
   }, [songs, outcomes, settings.dimensions, activeDimension, profile, destinations, appendLog])
@@ -395,6 +449,11 @@ export default function App() {
     try {
       const result = await applyWritePlan(plans, {
         onCreated: (playlistName, playlistId) => {
+          for (const [category, choice] of Object.entries(destinations)) {
+            if (choice.kind === 'new' && choice.playlistName.trim() === playlistName) {
+              manualDestinationsRef.current[category] = { kind: 'existing', playlistId }
+            }
+          }
           setDestinations((previous) => Object.fromEntries(
             Object.entries(previous).map(([category, choice]) => [
               category,
@@ -422,10 +481,11 @@ export default function App() {
       setPlans([])
       setBusy(false)
     }
-  }, [plans, connect])
+  }, [plans, connect, destinations])
 
   const updateSongCategory = useCallback(
     (songId: number, dimKey: Settings['dimensions'][number]['key'], category: string, previousCategory = '') => {
+      if (dimKey === 'artist' && category && !activeDimension?.categories.includes(category)) return
       setOutcomes((prev) => {
         const next = new Map(prev)
         const entry = { ...(next.get(songId) ?? {}) }
@@ -441,11 +501,11 @@ export default function App() {
       })
       setPlans([])
     },
-    [],
+    [activeDimension],
   )
 
   const mergeCategory = useCallback((source: string, target: string) => {
-    if (!activeDimension || source === target) return
+    if (!activeDimension || source === target || !activeDimension.categories.includes(source) || !activeDimension.categories.includes(target)) return
     const dimensionKey = activeDimension.key
     setOutcomes((previous) => {
       const next = new Map(previous)
@@ -483,6 +543,8 @@ export default function App() {
       delete next[source]
       return next
     })
+    delete manualDestinationsRef.current[source]
+    setArtistResolutions({})
     setPlans([])
   }, [activeDimension])
 
@@ -508,7 +570,10 @@ export default function App() {
             key={s}
             className={s === step ? 'active' : i < currentIndex ? 'done' : ''}
             onClick={() => {
-              if (!busy && (i <= currentIndex || canGo[s as keyof typeof canGo])) setStep(s)
+              if (!busy && (i <= currentIndex || canGo[s as keyof typeof canGo])) {
+                setStep(s)
+                if (s === 'preview') void buildPlan()
+              }
             }}
           >
             {STEP_LABELS[s]}
@@ -540,7 +605,14 @@ export default function App() {
           songs={songs}
           songMsg={songMsg}
           busy={busy}
-          onSelect={setSelected}
+          onSelect={(playlist) => {
+            if (playlist.id !== selected?.id) {
+              invalidateClassification()
+              setSongs([])
+              setSongMsg('')
+            }
+            setSelected(playlist)
+          }}
           onLoadSongs={() => void loadSongs()}
           onNext={() => setStep('configure')}
         />
@@ -549,9 +621,9 @@ export default function App() {
       {step === 'configure' && (
         <ConfigureStep
           settings={settings}
-          onChange={setSettings}
+          onChange={updateSettings}
           onChangeAndSave={(next: Settings) => {
-            setSettings(next)
+            updateSettings(next)
             void saveSettings(next)
           }}
           onNext={() => void startClassify()}
@@ -591,16 +663,24 @@ export default function App() {
           }}
           playlists={playlists.filter((playlist) => playlist.userId === profile?.userId)}
           destinations={destinations}
+          artistResolutions={artistResolutions}
+          scanWarnings={scanWarnings}
+          planMessage={planMessage}
           plans={plans}
           busy={busy}
           applyLog={applyLog}
           onDestinationChange={(category, choice) => {
+            manualDestinationsRef.current[category] = choice
             setDestinations((previous) => ({ ...previous, [category]: choice }))
+            setArtistResolutions((previous) => ({
+              ...previous,
+              [category]: { destination: choice, reason: '已手动选择目标，重新计算时保留。', candidates: [], needsConfirmation: false },
+            }))
             setPlans([])
           }}
           onSongCategoryChange={updateSongCategory}
           onMergeCategory={mergeCategory}
-          onRebuildPlan={() => void buildPlan(destinations)}
+          onRebuildPlan={() => void buildPlan()}
           onApply={() => void applyPlan()}
           onBack={() => setStep('classify')}
         />

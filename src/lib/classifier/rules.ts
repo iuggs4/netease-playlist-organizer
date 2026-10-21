@@ -15,6 +15,17 @@ export function artistNames(song: Song): string[] {
   return [...new Set(song.artists.filter((name) => typeof name === 'string').map((name) => name.trim()).filter(Boolean))]
 }
 
+export function artistSongCounts(songs: Song[]): Map<string, number> {
+  const tracks = new Map<string, Set<number>>()
+  for (const song of songs) {
+    for (const artist of artistNames(song)) {
+      if (!tracks.has(artist)) tracks.set(artist, new Set())
+      tracks.get(artist)!.add(song.id)
+    }
+  }
+  return new Map([...tracks].map(([artist, ids]) => [artist, ids.size]))
+}
+
 export function decadeOf(publishTime?: number): string | null {
   // 注意：不能把 <= 0 当作无效值。1970 年之前的时间戳本身就是负数，
   // 而网易云上确实存在 60/70 年代的老录音，用 <= 0 判定会把这些歌漏掉。

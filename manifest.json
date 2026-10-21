@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "网易云红心歌单分类",
-  "version": "0.2.0",
-  "description": "按歌手等维度分类网易云歌单，合唱多归属，歌手分类无需 AI。预览后追加到已有或新建歌单。",
+  "version": "0.3.0",
+  "description": "按歌手等维度分类网易云歌单，支持歌曲数量门槛与已有歌单内容配对，歌手分类无需 AI。预览后追加歌曲。",
   "permissions": ["storage", "tabs"],
   "host_permissions": ["https://music.163.com/*", "http://music.163.com/*"],
   "optional_host_permissions": ["https://*/*"],

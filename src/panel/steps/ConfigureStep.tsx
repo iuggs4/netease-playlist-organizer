@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { Dimension, DimensionKey } from '@/lib/types'
 import type { Settings } from '@/lib/store'
+import { normalizeMinArtistSongs } from '@/lib/store'
 
 interface Props {
   settings: Settings
@@ -87,9 +88,22 @@ export default function ConfigureStep({
         <span className="muted small">{DIM_HINT[dimension.key]}</span>
       </div>
       {dimension.key === 'artist' ? (
-        <p className="muted small" style={{ marginTop: 8 }}>
-          自动读取每首歌的完整歌手名单，每位歌手一个分类；歌单名默认使用完整歌手名，可在预览时修改或选择已有歌单。
-        </p>
+        <div style={{ marginTop: 8 }}>
+          <label htmlFor="min-artist-songs">歌手最少歌曲数（含此数量）</label>
+          <input
+            id="min-artist-songs"
+            type="number"
+            min={1}
+            step={1}
+            value={settings.minArtistSongs}
+            disabled={!dimension.enabled}
+            onChange={(event) => patch({ minArtistSongs: normalizeMinArtistSongs(Number(event.target.value)) })}
+          />
+          <p className="muted small">
+            默认 10 首。按来源歌单的不同歌曲计数，合唱分别计入每位歌手；不足门槛的歌手跳过，原列表保留。
+            预览时会扫描已有歌单：全部歌曲都包含该歌手时，才能按内容配对；有歧义时由你选择。
+          </p>
+        </div>
       ) : dimension.key === 'genre' ? (
         <div className="grid2" style={{ marginTop: 8 }}>
           <div>

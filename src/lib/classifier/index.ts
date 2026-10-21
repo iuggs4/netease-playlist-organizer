@@ -4,8 +4,8 @@
 
 import type { Dimension, DimensionKey, Song } from '@/lib/types'
 import type { Settings, CachedClass } from '@/lib/store'
-import { cacheKeyFor, loadCache, mergeCache } from '@/lib/store'
-import { artistNames, decadeOf } from './rules'
+import { cacheKeyFor, loadCache, mergeCache, normalizeMinArtistSongs } from '@/lib/store'
+import { artistNames, artistSongCounts, decadeOf } from './rules'
 import { classifyChunk, needsLlm, type SongOutcome } from './llm'
 
 export interface ClassifyProgress {
@@ -82,11 +82,13 @@ export async function classifySongs(
   const dims = settings.dimensions.filter((d) => d.enabled)
   const outcomes = new Map<number, SongOutcome>()
   if (dims.length === 1 && dims[0].key === 'artist') {
+    const minimum = normalizeMinArtistSongs(settings.minArtistSongs)
+    const eligible = new Set([...artistSongCounts(songs)].filter(([, count]) => count >= minimum).map(([artist]) => artist))
     for (const song of songs) {
       if (signal?.aborted) throw new DOMException('已停止分类', 'AbortError')
-      outcomes.set(song.id, { artist: { category: artistNames(song), source: 'rules' } })
+      outcomes.set(song.id, { artist: { category: artistNames(song).filter((artist) => eligible.has(artist)), source: 'rules' } })
     }
-    onProgress?.({ done: songs.length, total: songs.length, cached: 0, failed: 0, message: '已按歌曲资料完成歌手分类，合唱分别归入每位歌手' })
+    onProgress?.({ done: songs.length, total: songs.length, cached: 0, failed: 0, message: `已按歌曲资料完成歌手分类，仅保留至少 ${minimum} 首的歌手，合唱分别计数` })
     return { outcomes, failedBatches: 0 }
   }
   const cache = await loadCache()
@@ -210,7 +212,10 @@ export function groupByDimension(
   const groups = new Map<string, Song[]>()
   for (const category of dimension.categories) groups.set(category, [])
 
+  const seen = new Set<number>()
   for (const song of songs) {
+    if (seen.has(song.id)) continue
+    seen.add(song.id)
     const entry = outcomes.get(song.id)?.[dimension.key]
     if (!entry) continue
     for (const category of categoriesOf(entry.category)) {

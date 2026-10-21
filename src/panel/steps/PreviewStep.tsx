@@ -3,6 +3,8 @@ import type { DimensionKey, PlaylistBrief, Song } from '@/lib/types'
 import type { Settings } from '@/lib/store'
 import type { SongOutcome } from '@/lib/classifier/llm'
 import { groupByDimension } from '@/lib/classifier'
+import { artistSongCounts } from '@/lib/classifier/rules'
+import type { ArtistDestinationResolution } from '@/lib/artist-playlists'
 import type { CategoryPlan, DestinationChoice } from '@/lib/writer'
 import { defaultDestinationFor } from '@/lib/writer'
 
@@ -12,6 +14,9 @@ interface Props {
   settings: Settings
   playlists: PlaylistBrief[]
   destinations: Record<string, DestinationChoice>
+  artistResolutions: Record<string, ArtistDestinationResolution>
+  scanWarnings: string[]
+  planMessage: string
   plans: CategoryPlan[]
   busy: boolean
   applyLog: string[]
@@ -35,6 +40,9 @@ export default function PreviewStep({
   settings,
   playlists,
   destinations,
+  artistResolutions,
+  scanWarnings,
+  planMessage,
   plans,
   busy,
   applyLog,
@@ -58,6 +66,9 @@ export default function PreviewStep({
   const buckets = groupByDimension(songs, outcomes, dim)
   const classifiedIds = new Set([...buckets.values()].flatMap((list) => list.map((song) => song.id)))
   const unclassified = songs.filter((song) => !classifiedIds.has(song.id))
+  const skippedArtists = dim.key === 'artist'
+    ? [...artistSongCounts(songs)].filter(([, count]) => count < settings.minArtistSongs)
+    : []
   const toggleSongs = (category: string, open: boolean) => {
     setExpandedCategories((previous) => {
       const next = new Set(previous)
@@ -107,19 +118,45 @@ export default function PreviewStep({
             <h2 style={{ margin: 0 }}>{dim.label}分类结果</h2>
             <p className="muted small" style={{ margin: '5px 0 0' }}>
               本次仅运行一个维度。每个类目可导入已有歌单或新建歌单；未分类歌曲不会自动导入。
-              {dim.key === 'artist' && '合唱会出现在每位歌手下；调整当前归属会保留其他歌手归属。'}
+              {dim.key === 'artist' && `仅保留来源歌单中至少 ${settings.minArtistSongs} 首的歌手。合唱分别计数；调整当前归属会保留其他歌手归属。`}
             </p>
           </div>
           <span className="badge">{songs.length} 首</span>
         </div>
       </div>
 
+      {planMessage && <div className="card muted small" role="status">{planMessage}</div>}
+
+      {scanWarnings.length > 0 && (
+        <div className="card">
+          <details>
+            <summary>有 {scanWarnings.length} 个歌单未参与内容识别</summary>
+            {scanWarnings.map((warning) => <p key={warning} className="muted small">{warning}</p>)}
+          </details>
+        </div>
+      )}
+
+      {skippedArtists.length > 0 && (
+        <div className="card">
+          <details>
+            <summary>未达门槛：跳过 {skippedArtists.length} 位歌手</summary>
+            <p className="muted small">来源歌单中不足 {settings.minArtistSongs} 首，不为这些歌手生成导入任务。原列表保留。</p>
+            {skippedArtists.map(([artist, count]) => <p key={artist} className="muted small">{artist}：{count} 首，少于 {settings.minArtistSongs} 首</p>)}
+          </details>
+        </div>
+      )}
+
+      {dim.key === 'artist' && dim.categories.length === 0 && (
+        <div className="card muted small">没有歌手达到数量门槛。可返回配置调整最少歌曲数后重新分类。</div>
+      )}
+
       {[...buckets.entries()].map(([category, list]) => {
         const suggestedTitle = dim.playlistNames?.[category] ?? category
-        const choice = destinations[category] ?? defaultDestinationFor(suggestedTitle, availableTargets)
-        const title = choice.kind === 'existing'
+        const resolution = artistResolutions[category]
+        const choice = destinations[category] ?? (resolution?.needsConfirmation ? undefined : defaultDestinationFor(suggestedTitle, availableTargets))
+        const title = choice?.kind === 'existing'
           ? availableTargets.find((playlist) => playlist.id === choice.playlistId)?.name ?? suggestedTitle
-          : choice.playlistName
+          : choice?.playlistName
 
         return (
           <div className="card" key={category}>
@@ -135,6 +172,14 @@ export default function PreviewStep({
             {dim.playlistNames?.[category] && (
               <p className="muted small" style={{ margin: '3px 0 0' }}>
                 歌单名建议：{dim.playlistNames[category]}
+              </p>
+            )}
+            {resolution && (
+              <p className={`small ${resolution.needsConfirmation ? 'err' : 'muted'}`}>
+                {resolution.reason}
+                {resolution.needsConfirmation && resolution.candidates.length > 0 && (
+                  <span> 候选：{resolution.candidates.map((candidate) => `《${candidate.playlistName}》（${candidate.trackCount} 首）`).join('、')}。请选择目标。</span>
+                )}
               </p>
             )}
             {dim.categories.length > 1 && (dim.key !== 'artist' || expandedCategories.has(category)) && (
@@ -176,9 +221,10 @@ export default function PreviewStep({
               <div>
                 <label>导入目标</label>
                 <select
+                  aria-label={`${category}的导入目标`}
                   style={{ width: '100%' }}
                   disabled={busy}
-                  value={targetValue(choice)}
+                  value={choice ? targetValue(choice) : 'unresolved'}
                   onChange={(event) => {
                     const value = event.target.value
                     if (value === 'new') {
@@ -189,6 +235,7 @@ export default function PreviewStep({
                     }
                   }}
                 >
+                  {!choice && <option value="unresolved" disabled>请选择目标歌单</option>}
                   <option value="new">新建歌单</option>
                   {availableTargets.map((playlist) => (
                     <option key={playlist.id} value={`existing:${playlist.id}`}>
@@ -197,10 +244,11 @@ export default function PreviewStep({
                   ))}
                 </select>
               </div>
-              {choice.kind === 'new' ? (
+              {choice?.kind === 'new' ? (
                 <div>
                   <label>新歌单名称</label>
                   <input
+                    aria-label={`${category}的新歌单名称`}
                     type="text"
                     disabled={busy}
                     style={{ width: '100%' }}

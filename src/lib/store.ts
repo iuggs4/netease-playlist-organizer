@@ -14,6 +14,8 @@ export interface Settings {
   dimensions: Dimension[]
   /** 曲风动态分类的最大类目数 */
   maxGenreCategories: number
+  /** 来源歌单中歌手至少拥有的不同歌曲数（包含边界） */
+  minArtistSongs: number
   playlistNameStyle: PlaylistNameStyle
   customPlaylistNameStyle: string
   /** 每批送给模型的歌曲数 */
@@ -101,11 +103,18 @@ export const DEFAULT_SETTINGS: Settings = {
   model: 'deepseek-chat',
   dimensions: DEFAULT_DIMENSIONS,
   maxGenreCategories: 3,
+  minArtistSongs: 10,
   playlistNameStyle: 'concise',
   customPlaylistNameStyle: '',
   batchSize: 20,
   concurrency: 3,
   dryRun: true,
+}
+
+export function normalizeMinArtistSongs(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    ? value
+    : DEFAULT_SETTINGS.minArtistSongs
 }
 
 export async function loadSettings(): Promise<Settings> {
@@ -114,6 +123,7 @@ export async function loadSettings(): Promise<Settings> {
   return {
     ...DEFAULT_SETTINGS,
     ...saved,
+    minArtistSongs: normalizeMinArtistSongs(saved?.minArtistSongs),
     maxGenreCategories: Math.min(
       8,
       Math.max(2, Math.round(Number(saved?.maxGenreCategories) || DEFAULT_SETTINGS.maxGenreCategories)),
