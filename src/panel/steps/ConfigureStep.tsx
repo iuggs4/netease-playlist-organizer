@@ -73,9 +73,9 @@ export default function ConfigureStep({
   }
 
   const renderDimension = (dimension: Dimension) => (
-    <div key={dimension.key} style={{ marginTop: 14 }}>
+    <div key={dimension.key} className={`dimension-option ${dimension.enabled ? 'selected' : ''}`}>
       <div className="row between wrap">
-        <label style={{ margin: 0 }}>
+        <label className="dimension-label">
           <input
             type="radio"
             name="classification-dimension"
@@ -109,6 +109,7 @@ export default function ConfigureStep({
           <div>
             <label>最多曲风类别数（2–8）</label>
             <input
+              aria-label="最多曲风类别数"
               type="number"
               min={2}
               max={8}
@@ -136,6 +137,7 @@ export default function ConfigureStep({
         </div>
       ) : (
         <textarea
+          aria-label={`${dimension.label}分类类别`}
           style={{ marginTop: 6, minHeight: 54 }}
           value={dimension.categories.join('、')}
           disabled={!dimension.enabled}
@@ -154,6 +156,7 @@ export default function ConfigureStep({
 
   return (
     <>
+      <div className="step-content">
       <div className="card">
         <h2>选择分类维度</h2>
         <p className="muted small">
@@ -182,6 +185,7 @@ export default function ConfigureStep({
         </p>
         <label>选择风格</label>
         <select
+          aria-label="歌单命名风格"
           style={{ width: '100%' }}
           value={settings.playlistNameStyle}
           onChange={(event) => patch({ playlistNameStyle: event.target.value as Settings['playlistNameStyle'] })}
@@ -196,6 +200,7 @@ export default function ConfigureStep({
           <div style={{ marginTop: 10 }}>
             <label>描述你想要的命名风格</label>
             <textarea
+              aria-label="自定义歌单命名风格"
               maxLength={120}
               style={{ width: '100%', minHeight: 72 }}
               value={settings.customPlaylistNameStyle}
@@ -218,6 +223,7 @@ export default function ConfigureStep({
           <div>
             <label>接口地址</label>
             <input
+              aria-label="模型接口地址"
               type="text"
               style={{ width: '100%' }}
               value={settings.baseUrl}
@@ -227,6 +233,7 @@ export default function ConfigureStep({
           <div>
             <label>模型名</label>
             <input
+              aria-label="模型名称"
               type="text"
               style={{ width: '100%' }}
               value={settings.model}
@@ -236,6 +243,7 @@ export default function ConfigureStep({
           <div>
             <label>API Key</label>
             <input
+              aria-label="模型 API Key"
               type="password"
               style={{ width: '100%' }}
               value={settings.apiKey}
@@ -246,6 +254,7 @@ export default function ConfigureStep({
           <div>
             <label>每批歌曲数</label>
             <input
+              aria-label="每批歌曲数"
               type="number"
               min={5}
               max={50}
@@ -256,6 +265,7 @@ export default function ConfigureStep({
           <div>
             <label>并发请求数</label>
             <input
+              aria-label="并发请求数"
               type="number"
               min={1}
               max={8}
@@ -270,16 +280,16 @@ export default function ConfigureStep({
         </p>
       </div>
       </>}
-
-      <div className="row between">
+      </div>
+      <footer className="step-actions">
         <button onClick={onBack}>上一步</button>
-        <div className="row">
+        <div className="actions-group">
           <button onClick={() => onChangeAndSave(settings)}>保存设置</button>
           <button className="primary" onClick={onNext} disabled={!activeDimension || songCount === 0}>
             开始分类
           </button>
         </div>
-      </div>
+      </footer>
     </>
   )
 }

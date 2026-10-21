@@ -45,11 +45,19 @@ import PreviewStep from './steps/PreviewStep'
 export type Step = 'connect' | 'select' | 'configure' | 'classify' | 'preview'
 
 const STEP_LABELS: Record<Step, string> = {
-  connect: '1 登录',
-  select: '2 选歌单',
-  configure: '3 配置',
-  classify: '4 分类',
-  preview: '5 预览与写入',
+  connect: '登录连接',
+  select: '来源歌单',
+  configure: '分类规则',
+  classify: '分类进度',
+  preview: '核对导入',
+}
+
+const STEP_HINTS: Record<Step, string> = {
+  connect: '连接已登录的网易云账号，开始整理你的音乐。',
+  select: '选择歌曲来源，原歌单和喜欢列表都会保留。',
+  configure: '选择一种分类方式，设置本次整理规则。',
+  classify: '查看分类进度，完成后核对歌曲与目标歌单。',
+  preview: '核对歌曲、配对依据和追加数量，再确认导入。',
 }
 
 const STEP_ORDER: Step[] = ['connect', 'select', 'configure', 'classify', 'preview']
@@ -560,15 +568,24 @@ export default function App() {
   )
 
   return (
-    <>
-      <h1>分类并导入</h1>
-      <p className="sub">选择来源歌单，分类后指定目标。</p>
-
-      <div className="steps">
+    <div className="app-shell">
+      <header className="app-header">
+        <div className="row between">
+          <div className="heading-copy">
+            <span className="section-kicker">歌单整理工作台</span>
+            <h1>{STEP_LABELS[step]}</h1>
+          </div>
+          <span className="step-counter">{currentIndex + 1} / {STEP_ORDER.length}</span>
+        </div>
+        <p className="sub">{STEP_HINTS[step]}</p>
+      <nav className="steps" aria-label="整理步骤">
         {STEP_ORDER.map((s, i) => (
-          <span
+          <button
+            type="button"
             key={s}
-            className={s === step ? 'active' : i < currentIndex ? 'done' : ''}
+            className={`step-button ${s === step ? 'active' : i < currentIndex ? 'done' : ''}`}
+            aria-current={s === step ? 'step' : undefined}
+            disabled={busy || !(i <= currentIndex || canGo[s as keyof typeof canGo])}
             onClick={() => {
               if (!busy && (i <= currentIndex || canGo[s as keyof typeof canGo])) {
                 setStep(s)
@@ -576,13 +593,16 @@ export default function App() {
               }
             }}
           >
-            {STEP_LABELS[s]}
-          </span>
+            <span className="step-number" aria-hidden="true">{i + 1}</span>
+            <span className="step-label">{STEP_LABELS[s]}</span>
+          </button>
         ))}
-      </div>
+      </nav>
+      </header>
 
-      {error && <div className="err">{error}</div>}
+      {error && <div className="err app-error" role="alert">{error}</div>}
 
+      <main className="app-main" aria-busy={busy}>
       {step === 'connect' && (
         <ConnectStep
           profile={profile}
@@ -685,6 +705,7 @@ export default function App() {
           onBack={() => setStep('classify')}
         />
       )}
-    </>
+      </main>
+    </div>
   )
 }

@@ -7,6 +7,7 @@ import { artistSongCounts } from '@/lib/classifier/rules'
 import type { ArtistDestinationResolution } from '@/lib/artist-playlists'
 import type { CategoryPlan, DestinationChoice } from '@/lib/writer'
 import { defaultDestinationFor } from '@/lib/writer'
+import SongList from '../components/SongList'
 
 interface Props {
   songs: Song[]
@@ -27,8 +28,6 @@ interface Props {
   onApply: () => void
   onBack: () => void
 }
-
-const UNCLASSIFIED = '未分类'
 
 function targetValue(choice: DestinationChoice): string {
   return choice.kind === 'existing' ? `existing:${choice.playlistId}` : 'new'
@@ -79,50 +78,25 @@ export default function PreviewStep({
   }
 
   const renderSongs = (category: string, list: Song[]) => (
-    <div className="songlist">
-      <table>
-        <tbody>
-          {list.map((song) => (
-            <tr key={song.id}>
-              <td style={{ width: '58%' }}>
-                {song.name}
-                <span className="muted small"> — {song.artists.join(' / ')}</span>
-              </td>
-              <td style={{ width: '42%' }}>
-                <select
-                  value={category}
-                  aria-label={`调整${song.name}在${category || UNCLASSIFIED}中的归属`}
-                  disabled={busy}
-                  onChange={(event) => onSongCategoryChange(song.id, dim.key, event.target.value, category)}
-                >
-                  {dim.categories.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                  <option value="">{UNCLASSIFIED}</option>
-                </select>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <SongList songs={list} category={category} dimension={dim} busy={busy} onCategoryChange={onSongCategoryChange} />
   )
+  const unresolvedCount = Object.values(artistResolutions).filter((resolution) => resolution.needsConfirmation).length
 
   return (
     <>
+      <div className="step-content">
       <div className="card">
-        <div className="row between wrap">
-          <div>
-            <h2 style={{ margin: 0 }}>{dim.label}分类结果</h2>
+            <h2>{dim.label}分类结果</h2>
             <p className="muted small" style={{ margin: '5px 0 0' }}>
               本次仅运行一个维度。每个类目可导入已有歌单或新建歌单；未分类歌曲不会自动导入。
               {dim.key === 'artist' && `仅保留来源歌单中至少 ${settings.minArtistSongs} 首的歌手。合唱分别计数；调整当前归属会保留其他歌手归属。`}
             </p>
-          </div>
-          <span className="badge">{songs.length} 首</span>
+        <div className="summary-grid">
+          <div><strong>{songs.length}</strong><span>来源歌曲</span></div>
+          <div><strong>{[...buckets.values()].filter((list) => list.length > 0).length}</strong><span>非空分类</span></div>
+          <div><strong>{plans.length ? plans.reduce((sum, plan) => sum + plan.toAdd.length, 0) : '—'}</strong><span>计划追加</span></div>
         </div>
+        {unresolvedCount > 0 && <p className="notice">还有 {unresolvedCount} 个分类需要明确选择目标，完成后重新计算计划。</p>}
       </div>
 
       {planMessage && <div className="card muted small" role="status">{planMessage}</div>}
@@ -159,10 +133,10 @@ export default function PreviewStep({
           : choice?.playlistName
 
         return (
-          <div className="card" key={category}>
+          <section className="card category-card" key={category}>
             <div className="row between wrap">
-              <h2 style={{ margin: 0 }}>{category}</h2>
-              <span className="muted small">{list.length} 首</span>
+              <h2 className="category-title truncate" title={category}>{category}</h2>
+              <span className="badge">{list.length} 首</span>
             </div>
             {dim.categoryHints?.[category] && (
               <p className="muted small" style={{ margin: '5px 0 0' }}>
@@ -183,9 +157,10 @@ export default function PreviewStep({
               </p>
             )}
             {dim.categories.length > 1 && (dim.key !== 'artist' || expandedCategories.has(category)) && (
-              <div className="row" style={{ marginTop: 8 }}>
+              <div className="row wrap merge-controls" style={{ marginTop: 8 }}>
                 <span className="muted small">合并此类到</span>
                 <select
+                  aria-label={`${category}的合并目标`}
                   disabled={busy}
                   value={mergeTargets[category] ?? ''}
                   onChange={(event) =>
@@ -264,20 +239,20 @@ export default function PreviewStep({
               ) : (
                 <div>
                   <label>目标歌单</label>
-                  <div className="muted small" style={{ paddingTop: 8 }}>{title}</div>
+                  <div className="target-name truncate" title={title}>{title ?? '请选择目标歌单'}</div>
                 </div>
               )}
             </div>
 
             {list.length > 0 ? (
               <details style={{ marginTop: 8 }} onToggle={(event) => toggleSongs(category, event.currentTarget.open)}>
-                <summary>查看并手动调整这 {list.length} 首歌</summary>
+                <summary>歌曲明细 · {list.length} 首<span className="summary-hint">点击歌名查看完整信息</span></summary>
                 {expandedCategories.has(category) && renderSongs(category, list)}
               </details>
             ) : (
               <p className="muted small">该类目为空，不会创建或更新歌单。</p>
             )}
-          </div>
+          </section>
         )
       })}
 
@@ -295,12 +270,7 @@ export default function PreviewStep({
         <p className="muted small">
           已有歌单只追加歌曲、跳过重复项，不会移除原有内容。多个类目可以合并到同一个目标歌单。
         </p>
-        <div className="row" style={{ marginTop: 12 }}>
-          <button onClick={onRebuildPlan} disabled={busy}>重新计算计划</button>
-          <button className="primary" onClick={onApply} disabled={busy || !hasChanges}>
-            确认导入
-          </button>
-        </div>
+        {plans.length === 0 && <p className="muted small">调整目标或归属后，请重新计算计划，再核对追加数量。</p>}
       </div>
 
       {plans.length > 0 && !hasChanges && (
@@ -310,23 +280,24 @@ export default function PreviewStep({
       {plans.length > 0 && (
         <div className="card">
           <h2>写入预览</h2>
-          <table>
+          <table className="plan-table">
+            <colgroup><col style={{ width: '28%' }} /><col style={{ width: '30%' }} /><col style={{ width: '14%' }} /><col style={{ width: '14%' }} /><col style={{ width: '14%' }} /></colgroup>
             <thead>
               <tr>
                 <th>目标歌单</th>
                 <th>来源类目</th>
-                <th>分类歌曲</th>
-                <th>将追加</th>
+                <th className="number-cell">歌曲</th>
+                <th className="number-cell">追加</th>
                 <th>动作</th>
               </tr>
             </thead>
             <tbody>
               {plans.map((plan) => (
                 <tr key={plan.destinationKey}>
-                  <td>{plan.playlistName}</td>
-                  <td className="muted">{plan.sourceCategories.join('、')}</td>
-                  <td className="muted">{plan.songIds.length}</td>
-                  <td className="muted">{plan.toAdd.length}</td>
+                  <td className="truncate" title={plan.playlistName}>{plan.playlistName}</td>
+                  <td className="truncate muted" title={plan.sourceCategories.join('、')}>{plan.sourceCategories.join('、')}</td>
+                  <td className="number-cell muted">{plan.songIds.length}</td>
+                  <td className="number-cell muted">{plan.toAdd.length}</td>
                   <td>
                     <span className={`badge ${plan.action}`}>
                       {plan.action === 'create' ? '新建' : plan.action === 'append' ? '追加' : '已包含'}
@@ -336,19 +307,35 @@ export default function PreviewStep({
               ))}
             </tbody>
           </table>
+          <div className="plan-cards">
+            {plans.map((plan) => (
+              <article className="plan-card" key={plan.destinationKey}>
+                <div className="row between">
+                  <strong className="truncate" title={plan.playlistName}>{plan.playlistName}</strong>
+                  <span className={`badge ${plan.action}`}>{plan.action === 'create' ? '新建' : plan.action === 'append' ? '追加' : '已包含'}</span>
+                </div>
+                <p className="truncate muted small" title={plan.sourceCategories.join('、')}>{plan.sourceCategories.join('、')}</p>
+                <div className="row between small"><span>分类歌曲 {plan.songIds.length} 首</span><strong>将追加 {plan.toAdd.length} 首</strong></div>
+              </article>
+            ))}
+          </div>
         </div>
       )}
 
       {applyLog.length > 0 && (
-        <div className="card">
-          <h2>导入日志</h2>
+        <details className="card">
+          <summary>查看导入日志 · {applyLog.length} 条</summary>
           <div className="log">{applyLog.join('\n')}</div>
-        </div>
+        </details>
       )}
-
-      <div className="row between">
-        <button onClick={onBack} disabled={busy}>上一步</button>
       </div>
+      <footer className="step-actions">
+        <button onClick={onBack} disabled={busy}>上一步</button>
+        <div className="actions-group">
+          <button onClick={onRebuildPlan} disabled={busy}>重新计算计划</button>
+          <button className="primary" onClick={onApply} disabled={busy || !hasChanges || unresolvedCount > 0}>确认导入</button>
+        </div>
+      </footer>
     </>
   )
 }

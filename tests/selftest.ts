@@ -12,6 +12,7 @@ import { extractJson, generatePlaylistNameSuggestions, needsLlm, sampleGenreSong
 import { categoriesOf, classifySongs, groupByDimension, replaceArtistCategory } from '@/lib/classifier'
 import { cacheKeyFor, loadSettings, normalizeDimensions, normalizeMinArtistSongs, playlistNameCacheKeyFor, DEFAULT_SETTINGS, type CachedClass } from '@/lib/store'
 import { selftestArtistPlaylists } from './artist-playlists'
+import { clampPanelPosition } from '@/lib/floating-layout'
 import { applyWritePlan, buildWritePlan, defaultDestinationFor, type CategoryWriteGroup } from '@/lib/writer'
 import { getUserPlaylists } from '@/lib/netease'
 import type { Dimension, PlaylistBrief } from '@/lib/types'
@@ -41,6 +42,16 @@ const song = (name: string, artist: string) => ({
   albumId: 0,
   duration: 0,
 })
+
+console.log('— 浮窗位置：拖动、展开与窗口缩放后保留安全边距 —')
+const normalPanel = { left: 100, top: 60, width: 640, height: 720 }
+eq('已在窗口内的位置保留', clampPanelPosition(normalPanel, { width: 1200, height: 900 }), { left: 100, top: 60 })
+eq('拖动到负坐标时留12px边距', clampPanelPosition({ ...normalPanel, left: -80, top: -30 }, { width: 1200, height: 900 }), { left: 12, top: 12 })
+eq('右下越界时自动移回', clampPanelPosition({ ...normalPanel, left: 1000, top: 600 }, { width: 1200, height: 900 }), { left: 548, top: 168 })
+eq('展开后按实际宽高重新定位', clampPanelPosition({ left: 548, top: 168, width: 960, height: 876 }, { width: 1200, height: 900 }), { left: 228, top: 12 })
+eq('窄窗口中自适应尺寸仍保留边距', clampPanelPosition({ left: 228, top: 168, width: 296, height: 456 }, { width: 320, height: 480 }), { left: 12, top: 12 })
+eq('收起后的浮球也能移回可视区域', clampPanelPosition({ left: 500, top: 500, width: 48, height: 48 }, { width: 320, height: 480 }), { left: 260, top: 420 })
+eq('不足24px可用留白时不将面板推到右侧', clampPanelPosition({ left: -10, top: -10, width: 48, height: 48 }, { width: 60, height: 60 }), { left: 6, top: 6 })
 
 console.log('— decadeOf：年代必须 100% 准，因为它不走模型 —')
 eq('1993 → 90年代', decadeOf(at(1993)), '90年代')

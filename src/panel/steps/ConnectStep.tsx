@@ -18,43 +18,33 @@ export default function ConnectStep({
   onClearCache,
 }: Props) {
   return (
-    <div className="card">
-      <h2>连接网易云</h2>
-      <p className="muted small">
-        本插件复用你浏览器里已有的登录态，不会索取账号密码，也不保存你的凭证到任何服务器。
-        请确保已有一个打开并登录的 <code>music.163.com</code> 标签页。
-      </p>
-
-      <div className="row between wrap" style={{ marginTop: 14 }}>
-        <div>
-          {profile ? (
-            <>
-              <span className="badge ok">已登录</span>
-              <span style={{ marginLeft: 8 }}>{profile.nickname}</span>
-              <span className="muted small" style={{ marginLeft: 8 }}>
-                uid {profile.userId}
-              </span>
-            </>
-          ) : (
-            <span className="badge">未检测到登录态</span>
-          )}
-        </div>
-        <div className="row">
-          <button onClick={onRefresh} disabled={busy}>
-            {busy ? '检测中…' : '重新检测'}
-          </button>
-          <button className="primary" onClick={onNext} disabled={!profile}>
-            下一步
-          </button>
-        </div>
+    <>
+      <div className="step-content">
+        <section className="card connection-card">
+          <span className="connection-mark" aria-hidden="true">♪</span>
+          <div className="connection-copy">
+            <span className={`badge ${profile ? 'ok' : ''}`}>{profile ? '已连接网易云' : '等待连接'}</span>
+            <h2 className="connection-name" title={profile?.nickname}>{profile?.nickname ?? '先登录，再开始整理'}</h2>
+            <p className="muted small">保持已登录的 music.163.com 标签页打开，即可使用当前账号。</p>
+          </div>
+        </section>
+        <section className="card">
+          <h2>你的音乐仍在原处</h2>
+          <p className="muted small">喜欢列表和来源歌单会保留。核对分类结果后，才会向你选择的目标歌单追加歌曲。</p>
+          <p className="muted small">无需提供网易云账号密码；按歌手分类也无需配置 AI。</p>
+        </section>
+        <details className="card">
+          <summary>本地分类缓存 · {cachedCount} 首</summary>
+          <p className="muted small">模型分类结果保存在当前浏览器，更换模型后自动隔离。歌手分类直接读取歌曲资料。</p>
+          <button className="ghost" onClick={() => void onClearCache()} disabled={busy || cachedCount === 0}>清空缓存</button>
+        </details>
       </div>
-
-      <div className="row between wrap" style={{ marginTop: 18 }}>
-        <span className="muted small">已缓存 {cachedCount} 首歌的分类结果（换模型会自动失效）</span>
-        <button className="ghost" onClick={() => void onClearCache()} disabled={busy || cachedCount === 0}>
-          清空缓存
+      <footer className="step-actions">
+        <button onClick={onRefresh} disabled={busy}>{busy ? '检测中…' : '重新检测'}</button>
+        <button className="primary" onClick={onNext} disabled={!profile || busy}>
+          选择来源歌单
         </button>
-      </div>
-    </div>
+      </footer>
+    </>
   )
 }

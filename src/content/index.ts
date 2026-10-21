@@ -9,6 +9,7 @@
 
 import type { NcmRequest, NcmRequestMessage, NcmResponse } from '@/lib/rpc'
 import { RPC_MAX_ATTEMPTS, RPC_MIN_INTERVAL_MS } from '@/lib/rpc'
+import { clampPanelPosition } from '@/lib/floating-layout'
 
 const BASE = 'https://music.163.com'
 
@@ -120,7 +121,19 @@ interface ToggleFloatingPanelMessage {
 let floatingHost: HTMLDivElement | null = null
 let floatingRoot: ShadowRoot | null = null
 let panelCollapsed = false
+let panelExpanded = false
 let suppressNextToggleClick = false
+
+function keepPanelInViewport(): void {
+  if (!floatingHost) return
+  const position = clampPanelPosition(floatingHost.getBoundingClientRect(), {
+    width: window.innerWidth, height: window.innerHeight,
+  })
+  floatingHost.style.left = `${position.left}px`
+  floatingHost.style.top = `${position.top}px`
+  floatingHost.style.right = 'auto'
+  floatingHost.style.bottom = 'auto'
+}
 
 function setPanelCollapsed(collapsed: boolean): void {
   if (!floatingHost || !floatingRoot) return
@@ -148,8 +161,8 @@ function createFloatingPanel(): void {
   floatingHost = document.createElement('div')
   floatingHost.id = 'netease-distribute-songs-floating-root'
   floatingHost.style.position = 'fixed'
-  floatingHost.style.right = '24px'
-  floatingHost.style.bottom = '24px'
+  floatingHost.style.right = '12px'
+  floatingHost.style.bottom = '12px'
   floatingHost.style.zIndex = '2147483647'
   floatingHost.style.pointerEvents = 'auto'
   floatingRoot = floatingHost.attachShadow({ mode: 'closed' })
@@ -160,8 +173,8 @@ function createFloatingPanel(): void {
       .floating-window {
         display: flex;
         flex-direction: column;
-        width: min(380px, calc(100vw - 24px));
-        height: min(560px, calc(100vh - 24px));
+        width: min(640px, calc(100vw - 24px));
+        height: min(720px, calc(100vh - 24px));
         min-width: min(320px, calc(100vw - 24px));
         min-height: min(260px, calc(100vh - 24px));
         overflow: hidden;
@@ -171,7 +184,11 @@ function createFloatingPanel(): void {
         box-shadow: 0 14px 42px rgba(28, 35, 48, .22), 0 2px 8px rgba(28, 35, 48, .08);
         color: #252a32;
         font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
-        transition: width .2s ease, height .2s ease, border-radius .2s ease, box-shadow .2s ease;
+        transition: border-radius .2s ease, box-shadow .2s ease;
+      }
+      .floating-window.expanded {
+        width: min(960px, calc(100vw - 24px));
+        height: calc(100vh - 24px);
       }
       .toolbar {
         height: 48px;
@@ -198,7 +215,8 @@ function createFloatingPanel(): void {
         font-size: 17px;
         font-weight: 700;
       }
-      .title-wrap { display: flex; flex: 1; flex-direction: column; line-height: 1.2; }
+      .title-wrap { display: flex; flex: 1; min-width: 0; flex-direction: column; line-height: 1.2; }
+      .title, .hint { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .title { font-size: 13px; font-weight: 650; letter-spacing: .01em; }
       .hint { margin-top: 2px; color: #9298a3; font-size: 10px; }
       button {
@@ -206,6 +224,7 @@ function createFloatingPanel(): void {
         place-items: center;
         width: 28px;
         height: 28px;
+        flex: 0 0 28px;
         border: 0;
         border-radius: 50%;
         background: #f3f4f6;
@@ -215,6 +234,7 @@ function createFloatingPanel(): void {
         transition: background .15s ease, color .15s ease, transform .15s ease;
       }
       button:hover { background: #eceef2; color: #343a43; }
+      button:focus-visible { outline: 2px solid #e54843; outline-offset: 3px; }
       .panel-frame {
         display: block;
         flex: 1;
@@ -245,7 +265,7 @@ function createFloatingPanel(): void {
         border-radius: 50%;
         background: transparent;
       }
-      .collapsed .brand-mark, .collapsed .title-wrap { display: none; }
+      .collapsed .brand-mark, .collapsed .title-wrap, .collapsed .expand-button { display: none; }
       .collapse-symbol { display: grid; place-items: center; }
       .music-symbol { display: none; width: 20px; height: 20px; }
       .collapsed .collapse-button {
@@ -271,6 +291,7 @@ function createFloatingPanel(): void {
           <span class="title">歌单整理</span>
           <span class="hint">网易云音乐 · 收起后任务继续</span>
         </span>
+        <button class="expand-button" type="button" title="展开为宽面板" aria-label="展开为宽面板" aria-pressed="false">⤢</button>
         <button class="collapse-button" type="button" title="收起浮窗（任务继续）" aria-label="收起浮窗（任务继续）">
           <span class="collapse-symbol">−</span>
           <svg class="music-symbol" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -287,7 +308,29 @@ function createFloatingPanel(): void {
   const frame = floatingRoot.querySelector<HTMLIFrameElement>('.panel-frame')
   const header = floatingRoot.querySelector<HTMLElement>('.toolbar')
   const collapseButton = floatingRoot.querySelector<HTMLButtonElement>('.collapse-button')
-  if (!frame || !header || !collapseButton) return
+  const expandButton = floatingRoot.querySelector<HTMLButtonElement>('.expand-button')
+  const shell = floatingRoot.querySelector<HTMLElement>('.floating-window')
+  if (!frame || !header || !collapseButton || !expandButton || !shell) return
+
+  let normalPosition: { left: number; top: number } | null = null
+  expandButton.addEventListener('click', () => {
+    if (!floatingHost) return
+    if (!panelExpanded) {
+      const rect = floatingHost.getBoundingClientRect()
+      normalPosition = { left: rect.left, top: rect.top }
+    }
+    panelExpanded = !panelExpanded
+    shell.classList.toggle('expanded', panelExpanded)
+    expandButton.textContent = panelExpanded ? '⤡' : '⤢'
+    expandButton.title = panelExpanded ? '还原浮窗尺寸' : '展开为宽面板'
+    expandButton.setAttribute('aria-label', expandButton.title)
+    expandButton.setAttribute('aria-pressed', String(panelExpanded))
+    if (!panelExpanded && normalPosition) {
+      floatingHost.style.left = `${normalPosition.left}px`
+      floatingHost.style.top = `${normalPosition.top}px`
+    }
+    keepPanelInViewport()
+  })
 
   frame.src = chrome.runtime.getURL('panel.html')
   collapseButton.addEventListener('click', (event) => {
@@ -317,12 +360,14 @@ function createFloatingPanel(): void {
     const move = (moveEvent: PointerEvent) => {
       if (!floatingHost || moveEvent.pointerId !== event.pointerId) return
       if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 8) didMove = true
-      const maxLeft = Math.max(0, window.innerWidth - rect.width)
-      const maxTop = Math.max(0, window.innerHeight - rect.height)
-      const left = Math.min(maxLeft, Math.max(0, startLeft + moveEvent.clientX - startX))
-      const top = Math.min(maxTop, Math.max(0, startTop + moveEvent.clientY - startY))
-      floatingHost.style.left = `${left}px`
-      floatingHost.style.top = `${top}px`
+      const bounds = floatingHost.getBoundingClientRect()
+      const position = clampPanelPosition({
+        left: startLeft + moveEvent.clientX - startX,
+        top: startTop + moveEvent.clientY - startY,
+        width: bounds.width, height: bounds.height,
+      }, { width: window.innerWidth, height: window.innerHeight })
+      floatingHost.style.left = `${position.left}px`
+      floatingHost.style.top = `${position.top}px`
     }
     const stop = (endEvent: PointerEvent) => {
       if (endEvent.pointerId !== event.pointerId) return
@@ -341,6 +386,9 @@ function createFloatingPanel(): void {
 
   document.documentElement.appendChild(floatingHost)
   setPanelCollapsed(false)
+  new ResizeObserver(keepPanelInViewport).observe(shell)
+  window.addEventListener('resize', keepPanelInViewport)
+  keepPanelInViewport()
 }
 
 chrome.runtime.onMessage.addListener(
