@@ -7,10 +7,14 @@
  *   npm run selftest
  */
 
-import { decadeOf, guessLanguage, looksInstrumental } from '@/lib/classifier/rules'
-import { extractJson, sampleGenreSongs } from '@/lib/classifier/llm'
-import { cacheKeyFor, playlistNameCacheKeyFor, DEFAULT_SETTINGS } from '@/lib/store'
-import { defaultDestinationFor } from '@/lib/writer'
+import { artistNames, decadeOf, guessLanguage, looksInstrumental } from '@/lib/classifier/rules'
+import { extractJson, generatePlaylistNameSuggestions, needsLlm, sampleGenreSongs } from '@/lib/classifier/llm'
+import { categoriesOf, classifySongs, groupByDimension, replaceArtistCategory } from '@/lib/classifier'
+import { cacheKeyFor, normalizeDimensions, playlistNameCacheKeyFor, DEFAULT_SETTINGS, type CachedClass } from '@/lib/store'
+import { applyWritePlan, buildWritePlan, defaultDestinationFor, type CategoryWriteGroup } from '@/lib/writer'
+import { getUserPlaylists } from '@/lib/netease'
+import type { Dimension, PlaylistBrief } from '@/lib/types'
+import type { NcmRequestMessage } from '@/lib/rpc'
 
 let pass = 0
 let fail = 0
@@ -140,6 +144,131 @@ eq(
   ]),
   { kind: 'new', playlistName: '我喜欢的音乐' },
 )
+
+console.log('— 歌手分类：无需 Chrome 存储、网络或 API Key —')
+const artistSongs = [
+  { ...song('独唱', 'A'), id: 1 },
+  { ...song('合唱', 'A'), id: 2, artists: [' A ', 'B', 'A', '', ' '] },
+  { ...song('资料缺失', ''), id: 3, artists: [] },
+]
+const artistDimension: Dimension = {
+  key: 'artist', label: '歌手', enabled: true,
+  categories: [...new Set(artistSongs.flatMap(artistNames))],
+}
+const artistSettings = { ...DEFAULT_SETTINGS, dimensions: [artistDimension], apiKey: '', baseUrl: 'invalid-model-url' }
+const artistResult = await classifySongs(artistSongs, artistSettings)
+eq('独唱只有一个归属', artistResult.outcomes.get(1)?.artist?.category, ['A'])
+eq('合唱包含每位歌手，去空并去重', artistResult.outcomes.get(2)?.artist?.category, ['A', 'B'])
+eq('缺失歌手保持未分类', artistResult.outcomes.get(3)?.artist?.category, [])
+eq('歌手分类不调用模型', needsLlm(artistDimension), false)
+eq('年代仍使用规则', needsLlm({ ...artistDimension, key: 'era' }), false)
+eq('曲风仍使用模型', needsLlm(genreDimension), true)
+eq('旧分类字符串仍可读取', categoriesOf('流行'), ['流行'])
+const artistGroups = groupByDimension(artistSongs, artistResult.outcomes, artistDimension)
+eq('预览与写入共用 A 的分组', artistGroups.get('A')?.map((item) => item.id), [1, 2])
+eq('合唱也出现在 B 的分组', artistGroups.get('B')?.map((item) => item.id), [2])
+eq('修改 A 的归属时保留 B', replaceArtistCategory(['A', 'B'], 'A', 'C'), ['B', 'C'])
+eq('移除 A 的归属时保留 B', replaceArtistCategory(['A', 'B'], 'A', ''), ['B'])
+eq('合并到已有归属时不重复', replaceArtistCategory(['A', 'B'], 'A', 'B'), ['B'])
+eq('未分类歌曲可手动归类', replaceArtistCategory(undefined, '', 'A'), ['A'])
+eq('歌手名不按分隔符猜拆分', artistNames({ ...song('示例', 'A/B, C') }), ['A/B, C'])
+const longArtist = 'This Is A Very Long Artist Name'
+eq('长歌手名和自定义风格也不调用 AI', await generatePlaylistNameSuggestions({
+  baseUrl: 'invalid-model-url', apiKey: '', model: '',
+  dimension: { ...artistDimension, categories: [longArtist] }, style: 'custom', customStyle: '',
+}), { [longArtist]: longArtist })
+
+console.log('— 新旧设置兼容 —')
+eq('新安装默认选择歌手', normalizeDimensions().find((item) => item.enabled)?.key, 'artist')
+eq('旧用户的年代选择保留', normalizeDimensions([
+  { ...artistDimension, key: 'era', categories: ['90年代'] },
+]).find((item) => item.enabled)?.key, 'era')
+eq('旧用户的曲风选择保留', normalizeDimensions([genreDimension]).find((item) => item.enabled)?.key, 'genre')
+eq('旧设置自动补入歌手入口', normalizeDimensions([genreDimension]).some((item) => item.key === 'artist'), true)
+eq('上次的歌手名单不跨来源保存', normalizeDimensions([artistDimension]).find((item) => item.key === 'artist')?.categories, [])
+
+console.log('— 模拟网易云：目标去重、写入失败与重新计算 —')
+const mockPlaylists: PlaylistBrief[] = [{ ...existingPlaylist, trackCount: 1 }]
+const mockTracks = new Map<number, Set<number>>([[42, new Set([1])]])
+let createCount = 0
+let rejectNextAdd = false
+const legacyCache: Record<string, CachedClass> = {
+  [cacheKeyFor(DEFAULT_SETTINGS.baseUrl, DEFAULT_SETTINGS.model, 1, [genreDimension])]: {
+    genre: { category: '流行', source: 'llm' },
+  },
+}
+Object.defineProperty(globalThis, 'chrome', {
+  configurable: true,
+  value: {
+    storage: { local: { get: async () => ({ 'classify-cache:v1': legacyCache }) } },
+    tabs: {
+      query: async () => [{ id: 1 }],
+      sendMessage: async (_tabId: number, message: NcmRequestMessage) => {
+        const { path, params } = message.req
+        let data: unknown
+        if (path === '/api/user/playlist') {
+          data = { code: 200, playlist: mockPlaylists }
+        } else if (path === '/api/v6/playlist/detail') {
+          data = { code: 200, playlist: { trackIds: [...(mockTracks.get(Number(params?.id)) ?? [])].map((id) => ({ id })) } }
+        } else if (path === '/api/playlist/create') {
+          const id = 100 + createCount++
+          mockPlaylists.push({ id, name: String(params?.name), specialType: 0, trackCount: 0, userId: 7 })
+          mockTracks.set(id, new Set())
+          data = { code: 200, playlist: { id } }
+        } else if (path === '/api/playlist/manipulate/tracks') {
+          if (rejectNextAdd) {
+            rejectNextAdd = false
+            data = { code: 500, message: '模拟写入失败' }
+          } else {
+            const tracks = mockTracks.get(Number(params?.pid))!
+            for (const id of JSON.parse(String(params?.trackIds)) as number[]) tracks.add(id)
+            data = { code: 200 }
+          }
+        } else {
+          throw new Error(`自测不应访问 ${path}`)
+        }
+        return { ok: true, id: message.id, status: 200, data }
+      },
+    },
+  },
+})
+const legacyResult = await classifySongs([artistSongs[0]], { ...DEFAULT_SETTINGS, dimensions: [genreDimension] })
+eq('旧模型缓存保留单值结果', legacyResult.outcomes.get(1)?.genre?.category, '流行')
+const sharedGroups: CategoryWriteGroup[] = [...artistGroups].map(([category, songs]) => ({
+  dimension: 'artist', dimensionLabel: '歌手', category, displayTitle: category,
+  songs, destination: { kind: 'existing', playlistId: 42 },
+}))
+const sharedPlan = await buildWritePlan({ groups: sharedGroups, existingPlaylists: mockPlaylists })
+eq('多个歌手映射同一目标只生成一条计划', sharedPlan.length, 1)
+eq('合唱重叠和目标已有歌曲均去重', sharedPlan[0].toAdd, [2])
+await applyWritePlan(sharedPlan)
+eq('重复计算不会再次添加已存在歌曲', (await buildWritePlan({ groups: sharedGroups, existingPlaylists: mockPlaylists }))[0].action, 'none')
+
+const newGroups: CategoryWriteGroup[] = [
+  { ...sharedGroups[0], songs: [artistSongs[1]], destination: { kind: 'new', playlistName: 'A' } },
+  { ...sharedGroups[1], destination: { kind: 'new', playlistName: 'B' } },
+]
+const newPlan = await buildWritePlan({ groups: newGroups, existingPlaylists: mockPlaylists })
+let createdId: number | undefined
+rejectNextAdd = true
+try {
+  await applyWritePlan(newPlan, { onCreated: (_name, id) => { createdId = id } })
+  eq('API 非成功结果应终止写入', false, true)
+} catch (error) {
+  eq('API 非成功结果应终止写入', error instanceof Error && error.message.includes('500'), true)
+}
+eq('加歌失败前保存新建目标 ID', createdId, 100)
+eq('失败后不再创建后续歌单', createCount, 1)
+const refreshedPlaylists = await getUserPlaylists(7)
+const retryGroups = newGroups.map((group) => ({
+  ...group, destination: defaultDestinationFor(group.displayTitle, refreshedPlaylists),
+}))
+const retryPlan = await buildWritePlan({ groups: retryGroups, existingPlaylists: refreshedPlaylists })
+eq('重试复用已创建目标', retryPlan[0].existingPlaylistId, 100)
+await applyWritePlan(retryPlan)
+eq('重试只创建尚未创建的 B', createCount, 2)
+eq('重试成功把合唱写入 A', [...mockTracks.get(100)!], [2])
+eq('重试成功把合唱也写入 B', [...mockTracks.get(101)!], [2])
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`)
 process.exit(fail > 0 ? 1 : 0)

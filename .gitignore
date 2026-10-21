@@ -1,5 +1,6 @@
 node_modules/
 dist/
+releases/
 node_modules/.cache/
 *.local
 .DS_Store

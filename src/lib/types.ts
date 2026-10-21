@@ -30,14 +30,14 @@ export interface Song {
 /** 单首歌在某个维度上的归类结果 */
 export interface SongClass {
   songId: number
-  category: string
+  category: string | string[]
   /** 由谁判定：rules = 本地规则，llm = 模型，manual = 用户手改 */
   source: 'rules' | 'llm' | 'manual'
   reason?: string
 }
 
 /** 分类维度标识 */
-export type DimensionKey = 'mood' | 'genre' | 'language' | 'era'
+export type DimensionKey = 'artist' | 'mood' | 'genre' | 'language' | 'era'
 
 export type PlaylistNameStyle =
   | 'japanese-literary'

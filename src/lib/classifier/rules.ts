@@ -10,6 +10,11 @@
 
 import type { Song } from '@/lib/types'
 
+export function artistNames(song: Song): string[] {
+  // shortcut: 按完整名称分组，需区分同名艺人时改用网易云艺人 ID。
+  return [...new Set(song.artists.filter((name) => typeof name === 'string').map((name) => name.trim()).filter(Boolean))]
+}
+
 export function decadeOf(publishTime?: number): string | null {
   // 注意：不能把 <= 0 当作无效值。1970 年之前的时间戳本身就是负数，
   // 而网易云上确实存在 60/70 年代的老录音，用 <= 0 判定会把这些歌漏掉。

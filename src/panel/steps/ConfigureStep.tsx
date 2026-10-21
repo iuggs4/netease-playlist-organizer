@@ -14,6 +14,7 @@ interface Props {
 }
 
 const DIM_HINT: Record<DimensionKey, string> = {
+  artist: '歌手 —— 按歌曲资料分组，合唱归入每位歌手，无需 AI',
   mood: '情绪 / 场景 —— 依赖模型推断，主观性较强',
   genre: '曲风 —— AI 根据当前歌单生成最多 N 个风格类目',
   language: '语种 —— Unicode 预判后交模型复核',
@@ -39,8 +40,9 @@ export default function ConfigureStep({
     })
 
   const activeDimension = settings.dimensions.find((dimension) => dimension.enabled)
+  const isArtist = activeDimension?.key === 'artist'
   const [showMoreDimensions, setShowMoreDimensions] = useState(false)
-  const primaryOrder: DimensionKey[] = ['genre', 'mood', 'language']
+  const primaryOrder: DimensionKey[] = ['artist', 'genre', 'mood', 'language']
   const primaryDimensions = primaryOrder
     .map((key) => settings.dimensions.find((dimension) => dimension.key === key))
     .filter((dimension): dimension is Dimension => Boolean(dimension))
@@ -84,7 +86,11 @@ export default function ConfigureStep({
         </label>
         <span className="muted small">{DIM_HINT[dimension.key]}</span>
       </div>
-      {dimension.key === 'genre' ? (
+      {dimension.key === 'artist' ? (
+        <p className="muted small" style={{ marginTop: 8 }}>
+          自动读取每首歌的完整歌手名单，每位歌手一个分类；歌单名默认使用完整歌手名，可在预览时修改或选择已有歌单。
+        </p>
+      ) : dimension.key === 'genre' ? (
         <div className="grid2" style={{ marginTop: 8 }}>
           <div>
             <label>最多曲风类别数（2–8）</label>
@@ -137,7 +143,7 @@ export default function ConfigureStep({
       <div className="card">
         <h2>选择分类维度</h2>
         <p className="muted small">
-          每次只运行一个维度，一首歌只会被分到该维度的一个类目。
+          每次只运行一个维度。歌手分类支持合唱多归属，其他维度每首歌归入一个类目。
         </p>
 
         {primaryDimensions.map(renderDimension)}
@@ -154,6 +160,7 @@ export default function ConfigureStep({
         )}
       </div>
 
+      {!isArtist && <>
       <div className="card">
         <h2>歌单命名风格</h2>
         <p className="muted small">
@@ -248,6 +255,7 @@ export default function ConfigureStep({
           {settings.batchSize} 首估算，约 {estimatedCalls} 次模型调用；已有方案或名称缓存时会更少。
         </p>
       </div>
+      </>}
 
       <div className="row between">
         <button onClick={onBack}>上一步</button>

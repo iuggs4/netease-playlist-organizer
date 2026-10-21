@@ -157,7 +157,11 @@ export interface ApplyProgress {
 
 export async function applyWritePlan(
   plans: CategoryPlan[],
-  hooks: { onProgress?: (progress: ApplyProgress) => void; signal?: AbortSignal } = {},
+  hooks: {
+    onProgress?: (progress: ApplyProgress) => void
+    onCreated?: (playlistName: string, playlistId: number) => void
+    signal?: AbortSignal
+  } = {},
 ): Promise<{ created: number; updated: number; songWrites: number }> {
   const effective = plans.filter((plan) => plan.action !== 'none')
   let created = 0
@@ -177,6 +181,7 @@ export async function applyWritePlan(
         message: `新建歌单「${plan.playlistName}」`,
       })
       playlistId = await createPlaylist(plan.playlistName)
+      hooks.onCreated?.(plan.playlistName, playlistId)
       created++
     } else {
       updated++

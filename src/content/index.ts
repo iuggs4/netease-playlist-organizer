@@ -102,6 +102,8 @@ async function sendWithRetry(req: NcmRequest) {
     try {
       return await enqueue(() => send(req))
     } catch (err) {
+      // 创建结果不确定时先刷新核对，直接重发可能创建重复歌单。
+      if (req.path === '/api/playlist/create') throw err
       lastErr = err
     }
     if (attempt < RPC_MAX_ATTEMPTS) {

@@ -1,9 +1,9 @@
 {
   "name": "netease-distribute-songs-tools",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "把网易云「我喜欢的音乐」按情绪/曲风/语种/年代自动分类成多个歌单",
+  "description": "把网易云歌单按歌手/情绪/曲风/语种/年代分类，歌手分类无需 AI",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

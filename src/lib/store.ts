@@ -26,6 +26,12 @@ export interface Settings {
 
 export const DEFAULT_DIMENSIONS: Dimension[] = [
   {
+    key: 'artist',
+    label: '歌手',
+    enabled: true,
+    categories: [],
+  },
+  {
     key: 'mood',
     label: '情绪',
     enabled: false,
@@ -34,7 +40,7 @@ export const DEFAULT_DIMENSIONS: Dimension[] = [
   {
     key: 'genre',
     label: '曲风',
-    enabled: true,
+    enabled: false,
     categories: [],
   },
   {
@@ -51,13 +57,13 @@ export const DEFAULT_DIMENSIONS: Dimension[] = [
   },
 ]
 
-function normalizeDimensions(savedDimensions?: Dimension[]): Dimension[] {
+export function normalizeDimensions(savedDimensions?: Dimension[]): Dimension[] {
   const merged = DEFAULT_DIMENSIONS.map((fallback) => {
     const saved = savedDimensions?.find((d) => d.key === fallback.key)
     if (!saved) return { ...fallback }
 
-    if (saved.key === 'genre') {
-      // 曲风类别现在由当前来源歌单动态生成，不保留旧版固定分类。
+    if (saved.key === 'genre' || saved.key === 'artist') {
+      // 动态类别必须由当前来源歌单重新生成。
       return { ...fallback, ...saved, categories: [], categoryHints: undefined, playlistNames: undefined }
     }
 
@@ -70,11 +76,10 @@ function normalizeDimensions(savedDimensions?: Dimension[]): Dimension[] {
     }
   })
 
-  // 旧版本保存过多个 enabled=true。优先默认曲风，其次沿用第一个已启用维度。
+  // 先保留旧用户的选择，避免新增默认维度覆盖已保存的设置。
+  const savedEnabled = savedDimensions?.filter((d) => d.enabled && merged.some((item) => item.key === d.key))
   const selectedKey =
-    (merged.find((d) => d.key === 'genre' && d.enabled)?.key ??
-      merged.find((d) => d.enabled)?.key ??
-      'genre') as Dimension['key']
+    savedEnabled?.find((d) => d.key === 'genre')?.key ?? savedEnabled?.[0]?.key ?? 'artist'
 
   return merged.map((dimension) => ({
     ...dimension,
@@ -126,7 +131,7 @@ export async function saveSettings(s: Settings): Promise<void> {
 }
 
 /** 单首歌的分类结果（按维度存） */
-export type CachedClass = Partial<Record<DimensionKey, { category: string; source: string }>>
+export type CachedClass = Partial<Record<DimensionKey, { category: string | string[]; source: string }>>
 type CacheShape = Record<string, CachedClass>
 
 /** 缓存按模型、接口地址和分类定义隔离，修改提示或类别后不会误用旧结果。 */

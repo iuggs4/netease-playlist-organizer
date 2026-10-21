@@ -5,7 +5,7 @@
 import type { Dimension, DimensionKey, Song } from '@/lib/types'
 import type { Settings, CachedClass } from '@/lib/store'
 import { cacheKeyFor, loadCache, mergeCache } from '@/lib/store'
-import { decadeOf } from './rules'
+import { artistNames, decadeOf } from './rules'
 import { classifyChunk, needsLlm, type SongOutcome } from './llm'
 
 export interface ClassifyProgress {
@@ -81,6 +81,14 @@ export async function classifySongs(
   // 只处理启用中的维度
   const dims = settings.dimensions.filter((d) => d.enabled)
   const outcomes = new Map<number, SongOutcome>()
+  if (dims.length === 1 && dims[0].key === 'artist') {
+    for (const song of songs) {
+      if (signal?.aborted) throw new DOMException('已停止分类', 'AbortError')
+      outcomes.set(song.id, { artist: { category: artistNames(song), source: 'rules' } })
+    }
+    onProgress?.({ done: songs.length, total: songs.length, cached: 0, failed: 0, message: '已按歌曲资料完成歌手分类，合唱分别归入每位歌手' })
+    return { outcomes, failedBatches: 0 }
+  }
   const cache = await loadCache()
   const cachePatch: CacheShape = {}
 
@@ -181,6 +189,18 @@ export async function classifySongs(
   return { outcomes, failedBatches: failed }
 }
 
+export function categoriesOf(category: string | string[] | undefined): string[] {
+  return [...new Set((Array.isArray(category) ? category : category ? [category] : []).filter(Boolean))]
+}
+
+export function replaceArtistCategory(
+  category: string | string[] | undefined,
+  source: string,
+  target: string,
+): string[] {
+  return [...new Set([...categoriesOf(category).filter((item) => item !== source), ...(target ? [target] : [])])]
+}
+
 /** 按维度把歌曲分组，供预览和写歌单使用 */
 export function groupByDimension(
   songs: Song[],
@@ -193,8 +213,10 @@ export function groupByDimension(
   for (const song of songs) {
     const entry = outcomes.get(song.id)?.[dimension.key]
     if (!entry) continue
-    const bucket = groups.get(entry.category)
-    if (bucket) bucket.push(song)
+    for (const category of categoriesOf(entry.category)) {
+      const bucket = groups.get(category)
+      if (bucket) bucket.push(song)
+    }
   }
   return groups
 }

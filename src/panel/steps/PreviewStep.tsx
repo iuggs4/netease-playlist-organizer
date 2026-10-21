@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { DimensionKey, PlaylistBrief, Song } from '@/lib/types'
 import type { Settings } from '@/lib/store'
 import type { SongOutcome } from '@/lib/classifier/llm'
+import { groupByDimension } from '@/lib/classifier'
 import type { CategoryPlan, DestinationChoice } from '@/lib/writer'
 import { defaultDestinationFor } from '@/lib/writer'
 
@@ -15,7 +16,7 @@ interface Props {
   busy: boolean
   applyLog: string[]
   onDestinationChange: (category: string, choice: DestinationChoice) => void
-  onSongCategoryChange: (songId: number, dim: DimensionKey, category: string) => void
+  onSongCategoryChange: (songId: number, dim: DimensionKey, category: string, previousCategory: string) => void
   onMergeCategory: (source: string, target: string) => void
   onRebuildPlan: () => void
   onApply: () => void
@@ -45,6 +46,7 @@ export default function PreviewStep({
   onBack,
 }: Props) {
   const [mergeTargets, setMergeTargets] = useState<Record<string, string>>({})
+  const [expandedCategories, setExpandedCategories] = useState<Set<string>>(new Set())
   const dim = settings.dimensions.find((dimension) => dimension.enabled)
   const availableTargets = playlists.filter((playlist) => playlist.specialType !== 5)
   const hasChanges = plans.some((plan) => plan.action !== 'none')
@@ -53,14 +55,16 @@ export default function PreviewStep({
     return <div className="err">没有选择分类维度，请返回配置页选择一个维度。</div>
   }
 
-  const buckets = new Map<string, Song[]>()
-  for (const category of dim.categories) buckets.set(category, [])
-  const unclassified: Song[] = []
-  for (const song of songs) {
-    const category = outcomes.get(song.id)?.[dim.key]?.category
-    const bucket = category ? buckets.get(category) : undefined
-    if (bucket) bucket.push(song)
-    else unclassified.push(song)
+  const buckets = groupByDimension(songs, outcomes, dim)
+  const classifiedIds = new Set([...buckets.values()].flatMap((list) => list.map((song) => song.id)))
+  const unclassified = songs.filter((song) => !classifiedIds.has(song.id))
+  const toggleSongs = (category: string, open: boolean) => {
+    setExpandedCategories((previous) => {
+      const next = new Set(previous)
+      if (open) next.add(category)
+      else next.delete(category)
+      return next
+    })
   }
 
   const renderSongs = (category: string, list: Song[]) => (
@@ -76,7 +80,9 @@ export default function PreviewStep({
               <td style={{ width: '42%' }}>
                 <select
                   value={category}
-                  onChange={(event) => onSongCategoryChange(song.id, dim.key, event.target.value)}
+                  aria-label={`调整${song.name}在${category || UNCLASSIFIED}中的归属`}
+                  disabled={busy}
+                  onChange={(event) => onSongCategoryChange(song.id, dim.key, event.target.value, category)}
                 >
                   {dim.categories.map((option) => (
                     <option key={option} value={option}>
@@ -101,6 +107,7 @@ export default function PreviewStep({
             <h2 style={{ margin: 0 }}>{dim.label}分类结果</h2>
             <p className="muted small" style={{ margin: '5px 0 0' }}>
               本次仅运行一个维度。每个类目可导入已有歌单或新建歌单；未分类歌曲不会自动导入。
+              {dim.key === 'artist' && '合唱会出现在每位歌手下；调整当前归属会保留其他歌手归属。'}
             </p>
           </div>
           <span className="badge">{songs.length} 首</span>
@@ -130,10 +137,11 @@ export default function PreviewStep({
                 歌单名建议：{dim.playlistNames[category]}
               </p>
             )}
-            {dim.categories.length > 1 && (
+            {dim.categories.length > 1 && (dim.key !== 'artist' || expandedCategories.has(category)) && (
               <div className="row" style={{ marginTop: 8 }}>
                 <span className="muted small">合并此类到</span>
                 <select
+                  disabled={busy}
                   value={mergeTargets[category] ?? ''}
                   onChange={(event) =>
                     setMergeTargets((previous) => ({ ...previous, [category]: event.target.value }))
@@ -146,7 +154,7 @@ export default function PreviewStep({
                 </select>
                 <button
                   className="ghost"
-                  disabled={!mergeTargets[category]}
+                  disabled={busy || !mergeTargets[category]}
                   onClick={() => {
                     const target = mergeTargets[category]
                     if (target) {
@@ -169,6 +177,7 @@ export default function PreviewStep({
                 <label>导入目标</label>
                 <select
                   style={{ width: '100%' }}
+                  disabled={busy}
                   value={targetValue(choice)}
                   onChange={(event) => {
                     const value = event.target.value
@@ -193,6 +202,7 @@ export default function PreviewStep({
                   <label>新歌单名称</label>
                   <input
                     type="text"
+                    disabled={busy}
                     style={{ width: '100%' }}
                     value={choice.playlistName}
                     onChange={(event) =>
@@ -212,9 +222,9 @@ export default function PreviewStep({
             </div>
 
             {list.length > 0 ? (
-              <details style={{ marginTop: 8 }}>
+              <details style={{ marginTop: 8 }} onToggle={(event) => toggleSongs(category, event.currentTarget.open)}>
                 <summary>查看并手动调整这 {list.length} 首歌</summary>
-                {renderSongs(category, list)}
+                {expandedCategories.has(category) && renderSongs(category, list)}
               </details>
             ) : (
               <p className="muted small">该类目为空，不会创建或更新歌单。</p>
@@ -225,9 +235,9 @@ export default function PreviewStep({
 
       {unclassified.length > 0 && (
         <div className="card">
-          <details>
+          <details onToggle={(event) => toggleSongs('', event.currentTarget.open)}>
             <summary className="muted">未分类 {unclassified.length} 首（默认不导入，可手动归类）</summary>
-            {renderSongs('', unclassified)}
+            {expandedCategories.has('') && renderSongs('', unclassified)}
           </details>
         </div>
       )}
@@ -289,7 +299,7 @@ export default function PreviewStep({
       )}
 
       <div className="row between">
-        <button onClick={onBack}>上一步</button>
+        <button onClick={onBack} disabled={busy}>上一步</button>
       </div>
     </>
   )

@@ -19,7 +19,8 @@ import {
   getUserPlaylists,
   pickLikedPlaylist,
 } from '@/lib/netease'
-import { classifySongs, groupByDimension, type ClassifyProgress } from '@/lib/classifier'
+import { categoriesOf, classifySongs, groupByDimension, replaceArtistCategory, type ClassifyProgress } from '@/lib/classifier'
+import { artistNames } from '@/lib/classifier/rules'
 import {
   discoverGenreDimension,
   generatePlaylistNameSuggestions,
@@ -187,7 +188,7 @@ export default function App() {
       setError('请先选择来源歌单。')
       return
     }
-    if (settings.playlistNameStyle === 'custom' && !settings.customPlaylistNameStyle.trim()) {
+    if (configuredDimension.key !== 'artist' && settings.playlistNameStyle === 'custom' && !settings.customPlaylistNameStyle.trim()) {
       setError('请填写自定义歌单命名风格，或选择一个预设风格。')
       return
     }
@@ -198,14 +199,20 @@ export default function App() {
     setPlans([])
     setBusy(true)
     try {
-      const ok = await ensureHostPermission(settings.baseUrl)
-      if (!ok) throw new Error('未授予模型接口的访问权限，无法调用大模型。')
+      if (configuredDimension.key !== 'artist') {
+        const ok = await ensureHostPermission(settings.baseUrl)
+        if (!ok) throw new Error('未授予模型接口的访问权限，无法调用大模型。')
+      }
       await saveSettings(settings)
       const controller = new AbortController()
       abortRef.current = controller
       setStep('classify')
 
       let dimension = configuredDimension
+      if (configuredDimension.key === 'artist') {
+        dimension = { ...configuredDimension, categories: [...new Set(songs.flatMap(artistNames))] }
+        appendLog(`按歌曲资料中的 ${dimension.categories.length} 位歌手分类，无需 AI`)
+      }
       if (configuredDimension.key === 'genre') {
         setProgress({ done: 0, total: songs.length, cached: 0, failed: 0, message: '正在分析当前歌单的曲风分布…' })
         const cachedScheme = regenerateGenreScheme
@@ -231,8 +238,10 @@ export default function App() {
 
       let playlistNames: Record<string, string>
       const needsNameModel =
-        settings.playlistNameStyle !== 'concise' ||
-        dimension.categories.some((category) => Array.from(category).length > 12)
+        dimension.key !== 'artist' && (
+          settings.playlistNameStyle !== 'concise' ||
+          dimension.categories.some((category) => Array.from(category).length > 12)
+        )
       if (!needsNameModel) {
         playlistNames = Object.fromEntries(dimension.categories.map((category) => [category, category]))
       } else {
@@ -340,14 +349,21 @@ export default function App() {
     try {
       const dimension = activeDimension ?? settings.dimensions.find((item) => item.enabled)
       if (!dimension) throw new Error('请先选择一个分类维度。')
+      if (!profile) throw new Error('请先重新检测网易云登录状态。')
+      const currentPlaylists = await getUserPlaylists(profile.userId)
+      setPlaylists(currentPlaylists)
+      const writablePlaylists = currentPlaylists.filter((playlist) => playlist.userId === profile.userId)
 
       const grouped = groupByDimension(songs, outcomes, dimension)
       const groups: Parameters<typeof buildWritePlan>[0]['groups'] = []
       const resolvedDestinations: Record<string, DestinationChoice> = {}
       for (const category of dimension.categories) {
         const displayTitle = dimension.playlistNames?.[category] ?? category
-        const destination =
-          selectedDestinations[category] ?? defaultDestinationFor(displayTitle, playlists)
+        let destination =
+          selectedDestinations[category] ?? defaultDestinationFor(displayTitle, writablePlaylists)
+        if (destination.kind === 'new') {
+          destination = defaultDestinationFor(destination.playlistName.trim(), writablePlaylists)
+        }
         resolvedDestinations[category] = destination
         const categorySongs = grouped.get(category) ?? []
         if (categorySongs.length === 0) continue
@@ -362,7 +378,7 @@ export default function App() {
       }
       setDestinations(resolvedDestinations)
       appendLog('正在读取目标歌单，计算追加计划…')
-      const built = await buildWritePlan({ groups, existingPlaylists: playlists })
+      const built = await buildWritePlan({ groups, existingPlaylists: writablePlaylists })
       setPlans(built)
       appendLog(`生成 ${built.length} 条导入计划`)
     } catch (err) {
@@ -371,13 +387,23 @@ export default function App() {
     } finally {
       setBusy(false)
     }
-  }, [songs, outcomes, settings.dimensions, activeDimension, playlists, destinations, appendLog])
+  }, [songs, outcomes, settings.dimensions, activeDimension, profile, destinations, appendLog])
 
   const applyPlan = useCallback(async () => {
     setBusy(true)
     setError(null)
     try {
       const result = await applyWritePlan(plans, {
+        onCreated: (playlistName, playlistId) => {
+          setDestinations((previous) => Object.fromEntries(
+            Object.entries(previous).map(([category, choice]) => [
+              category,
+              choice.kind === 'new' && choice.playlistName.trim() === playlistName
+                ? { kind: 'existing', playlistId } as DestinationChoice
+                : choice,
+            ]),
+          ))
+        },
         onProgress: (p: ApplyProgress) => {
           setApplyLog((prev) => [
             ...prev.slice(-199),
@@ -391,18 +417,21 @@ export default function App() {
       ])
       await connect(true)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setError(`导入已停止：${err instanceof Error ? err.message : String(err)} 请重新计算计划后再试。`)
     } finally {
+      setPlans([])
       setBusy(false)
     }
   }, [plans, connect])
 
   const updateSongCategory = useCallback(
-    (songId: number, dimKey: Settings['dimensions'][number]['key'], category: string) => {
+    (songId: number, dimKey: Settings['dimensions'][number]['key'], category: string, previousCategory = '') => {
       setOutcomes((prev) => {
         const next = new Map(prev)
         const entry = { ...(next.get(songId) ?? {}) }
-        if (category) {
+        if (dimKey === 'artist') {
+          entry.artist = { category: replaceArtistCategory(entry.artist?.category, previousCategory, category), source: 'manual' }
+        } else if (category) {
           entry[dimKey] = { category, source: 'manual' }
         } else {
           delete entry[dimKey]
@@ -421,10 +450,15 @@ export default function App() {
     setOutcomes((previous) => {
       const next = new Map(previous)
       for (const [songId, outcome] of next) {
-        if (outcome[dimensionKey]?.category === source) {
+        if (categoriesOf(outcome[dimensionKey]?.category).includes(source)) {
           next.set(songId, {
             ...outcome,
-            [dimensionKey]: { category: target, source: 'manual' },
+            [dimensionKey]: {
+              category: dimensionKey === 'artist'
+                ? replaceArtistCategory(outcome.artist?.category, source, target)
+                : target,
+              source: 'manual',
+            },
           })
         }
       }
@@ -474,7 +508,7 @@ export default function App() {
             key={s}
             className={s === step ? 'active' : i < currentIndex ? 'done' : ''}
             onClick={() => {
-              if (i <= currentIndex || canGo[s as keyof typeof canGo]) setStep(s)
+              if (!busy && (i <= currentIndex || canGo[s as keyof typeof canGo])) setStep(s)
             }}
           >
             {STEP_LABELS[s]}
@@ -555,7 +589,7 @@ export default function App() {
                 : { ...dimension, enabled: false },
             ),
           }}
-          playlists={playlists}
+          playlists={playlists.filter((playlist) => playlist.userId === profile?.userId)}
           destinations={destinations}
           plans={plans}
           busy={busy}

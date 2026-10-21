@@ -10,7 +10,7 @@ import type { Dimension, DimensionKey, PlaylistNameStyle, Song } from '@/lib/typ
 import { decadeOf, guessLanguage, looksInstrumental } from './rules'
 
 export interface ClassifyOutcome {
-  category: string
+  category: string | string[]
   /** manual = 用户在预览界面手改过 */
   source: 'rules' | 'llm' | 'manual'
   reason?: string
@@ -20,7 +20,7 @@ export type SongOutcome = Partial<Record<DimensionKey, ClassifyOutcome>>
 
 /** 判断一个维度是否值得交给 LLM（年代用规则就够，问了也是浪费） */
 export function needsLlm(dim: Dimension): boolean {
-  return dim.key !== 'era'
+  return dim.key !== 'era' && dim.key !== 'artist'
 }
 
 interface LlmResult {
@@ -315,6 +315,9 @@ export async function generatePlaylistNameSuggestions(options: {
 }): Promise<Record<string, string>> {
   const categories = options.dimension.categories
   if (categories.length === 0) return {}
+  if (options.dimension.key === 'artist') {
+    return Object.fromEntries(categories.map((category) => [category, category]))
+  }
   if (options.style === 'concise' && categories.every((category) => Array.from(category).length <= 12)) {
     return Object.fromEntries(categories.map((category) => [category, category]))
   }

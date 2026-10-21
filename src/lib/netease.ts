@@ -51,15 +51,24 @@ async function callNcm(req: NcmRequest): Promise<unknown> {
   if (!res?.ok) {
     throw new NcmError(res?.error ?? '未知错误')
   }
+  if (res.status < 200 || res.status >= 300) {
+    throw new NcmError(`网易云请求失败（HTTP ${res.status}），请重新计算计划后再试。`)
+  }
 
   const body = res.data as { code?: number; message?: string } | null
-  if (body && typeof body.code === 'number' && NCM_AUTH_ERROR_CODES.has(body.code)) {
+  if (!body || typeof body.code !== 'number') {
+    throw new NcmError('网易云未返回有效的操作结果，请重新计算计划后再试。')
+  }
+  if (NCM_AUTH_ERROR_CODES.has(body.code)) {
     throw new NcmError(
       body.code === 250 || body.code === 301
         ? '登录态已失效，请到 music.163.com 重新登录。'
         : `网易云返回错误 ${body.code}：${body.message ?? ''}`,
       body.code,
     )
+  }
+  if (body.code !== 200) {
+    throw new NcmError(`网易云返回错误 ${body.code}：${body.message ?? '请求未成功，请稍后重试。'}`, body.code)
   }
   return res.data
 }
