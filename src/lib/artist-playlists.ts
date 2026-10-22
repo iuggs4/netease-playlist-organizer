@@ -29,11 +29,6 @@ export async function scanArtistPlaylists(
     try {
       ids = await getPlaylistTrackIds(playlist.id)
       evidence.trackCount = ids.length
-      if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
-        evidence.error = '歌单包含无效歌曲 ID，无法完整识别。'
-      } else if (ids.length !== playlist.trackCount) {
-        evidence.error = `歌单列表显示 ${playlist.trackCount} 首，实际读取 ${ids.length} 首，请刷新后重新配对。`
-      }
     } catch (error) {
       if (error instanceof NcmRateLimitError) throw error
       evidence.error = `读取歌单失败：${error instanceof Error ? error.message : String(error)}`

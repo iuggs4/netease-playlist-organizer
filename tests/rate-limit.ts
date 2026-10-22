@@ -24,7 +24,13 @@ export async function selftestRateLimit(): Promise<void> {
   let response: NcmResponse = { ok: true, id: 'test', status: 200, data: { code: 405 } }
   Object.defineProperty(globalThis, 'chrome', {
     configurable: true,
-    value: { tabs: { query: async () => [{ id: 1 }], sendMessage: async () => response } },
+    value: { tabs: {
+      query: async () => [{ id: 1 }],
+      sendMessage: async (_tabId: number, message: NcmRequestMessage) => {
+        if (message.req.path === '/api/v6/playlist/detail') assert.equal(message.req.params?.n, 100000, '请求完整歌曲 ID 列表')
+        return response
+      },
+    } },
   })
   try {
     const expectRateLimit = async (code: number, retryAfterMs = RATE_LIMIT_COOLDOWN_MS) => {
@@ -62,7 +68,7 @@ export async function selftestRateLimit(): Promise<void> {
       })
     }
 
-    for (const playlist of [undefined, {}, { tracks: [{ id: 1 }] }, { trackIds: [{ id: 1 }], trackCount: 2 }, { trackIds: [{ id: -1 }] }, { trackIds: {}, tracks: [] }]) {
+    for (const playlist of [undefined, {}, { tracks: [{ id: 1 }] }, { tracks: [{ id: 1 }], trackCount: 2 }, { trackIds: [{ id: -1 }] }, { trackIds: [null] }, { trackIds: {}, tracks: [] }]) {
       response = { ok: true, id: 'test', status: 200, data: { code: 200, playlist } }
       await assert.rejects(getPlaylistTrackIds(42), NcmError, '不完整目标快照不能被当作空歌单后重复写入')
     }
@@ -70,6 +76,15 @@ export async function selftestRateLimit(): Promise<void> {
     assert.deepEqual(await getPlaylistTrackIds(42), [], '完整空歌单可正常读取')
     response = { ok: true, id: 'test', status: 200, data: { code: 200, playlist: { trackIds: {}, tracks: [{ id: 1 }], trackCount: 1 } } }
     assert.deepEqual(await getPlaylistTrackIds(42), [1], '仅使用确认为数组且数量完整的回退歌曲列表')
+
+    response = { ok: true, id: 'test', status: 200, data: { code: 200, playlist: {
+      trackIds: Array.from({ length: 2399 }, (_, index) => ({ id: index + 1 })), trackCount: 2402, tracks: [],
+    } } }
+    assert.equal((await getPlaylistTrackIds(42)).length, 2399, '完整 trackIds 不受展示计数差异影响')
+    response = { ok: true, id: 'test', status: 200, data: { code: 200, playlist: { trackIds: [{ id: 1 }, { id: 1 }], trackCount: 2 } } }
+    assert.deepEqual(await getPlaylistTrackIds(42), [1], '完整 ID 列表先校验再去重')
+    response = { ok: true, id: 'test', status: 200, data: { code: 200, playlist: { tracks: [{ id: 1 }, { id: 1 }], trackCount: 2 } } }
+    assert.deepEqual(await getPlaylistTrackIds(42), [1], 'tracks 兜底按原始条目证明数量完整后去重')
 
     const offsets: number[] = []
     Object.defineProperty(globalThis, 'chrome', {

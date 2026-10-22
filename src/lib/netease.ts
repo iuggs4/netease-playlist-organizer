@@ -141,13 +141,13 @@ export function pickLikedPlaylist(list: PlaylistBrief[]): PlaylistBrief | null {
 
 /**
  * 取歌单的全部歌曲 ID。
- * n=0 时 tracks 为空但 trackIds 是完整的 —— 这是最省流量的取法，
- * 已实测 965 首的歌单返回 965 个 id，与 trackCount 一致。
+ * trackIds 是完整 ID 来源，tracks 可能仅包含可播放的部分歌曲。
+ * trackCount 是展示元数据，可能与有效 ID 数不同，不能据此拒绝 trackIds。
  */
 export async function getPlaylistTrackIds(playlistId: number): Promise<number[]> {
   const data = (await raw('/api/v6/playlist/detail', {
     id: playlistId,
-    n: 0,
+    n: 100000,
     timestamp: Date.now(),
   })) as {
     playlist?: { trackIds?: Array<{ id: number }>; tracks?: Array<{ id: number }>; trackCount?: number }
@@ -157,17 +157,20 @@ export async function getPlaylistTrackIds(playlistId: number): Promise<number[]>
   if (!pl || (!Array.isArray(pl.trackIds) && !Array.isArray(pl.tracks))) {
     throw new NcmError('网易云未返回完整歌曲列表，已停止核对，请稍后重新计算计划。')
   }
-  if (!Array.isArray(pl.trackIds) && !Number.isSafeInteger(pl.trackCount)) {
+  const hasTrackIds = Array.isArray(pl.trackIds)
+  if (!hasTrackIds && !Number.isSafeInteger(pl.trackCount)) {
     throw new NcmError('网易云未返回完整歌曲 ID，不能确认目标中哪些歌曲已存在。')
   }
-  const tracks = Array.isArray(pl.trackIds) ? pl.trackIds : pl.tracks!
-  const ids = [...new Set(tracks.map((t) => t?.id))]
-  // 不完整快照不能当作空歌单，否则限流恢复时会重复提交已接受的歌曲。
-  if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0) ||
-    (pl.trackCount !== undefined && (!Number.isSafeInteger(pl.trackCount) || pl.trackCount !== ids.length))) {
-    throw new NcmError('网易云返回的歌曲列表不完整，已停止核对，请稍后重新计算计划。')
+  const tracks = hasTrackIds ? pl.trackIds! : pl.tracks!
+  const ids = tracks.map((t) => t?.id)
+  if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+    throw new NcmError(`歌单 ${playlistId} 返回了无效歌曲 ID，已停止核对，请稍后重新计算计划。`)
   }
-  return ids
+  // 仅 tracks 兜底时，必须证明没有截断；校验原始条目数后才去重。
+  if (!hasTrackIds && pl.trackCount !== tracks.length) {
+    throw new NcmError(`歌单 ${playlistId} 缺少完整歌曲 ID，仅返回 ${tracks.length}/${pl.trackCount} 首详情，已停止核对。`)
+  }
+  return [...new Set(ids)]
 }
 
 interface RawSong {

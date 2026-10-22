@@ -4,6 +4,15 @@
 
 可以从「我喜欢的音乐」或其他已有歌单导入；分类后逐类选择已有目标歌单，或新建歌单。已有目标只追加歌曲、跳过重复项，不会删除原有内容。
 
+## 0.4.2：修正读取歌曲时的数量误判
+
+- 完整歌曲 ID 读取改用 `n=100000`。以接口的 `trackIds` 为完整 ID 来源，不再要求展示字段 `trackCount` 与去重后数量相等；只读排查中已观察到展示数量与合法 ID 数不同的响应。
+- 校验每个 ID 后再去重；缺少 ID 列表、无效 ID 仍会停止。仅有部分歌曲详情 `tracks` 时，仍要求原始条目数与 `trackCount` 一致，避免把部分列表当作完整来源。
+- 已有歌单的内容配对依据实际 ID 逐首核对详情，不再被旧的展示计数拦截；限流冷却与导入去重继续保留。
+- 读取方式参考维护项目的[歌单详情](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced/blob/main/module/playlist_detail.js)与[全量歌曲读取](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced/blob/main/module/playlist_track_all.js)。
+
+补充计数差异、重复 ID 与不完整详情的断言；**未运行本地测试，未执行真实歌单写入**。
+
 ## 0.4.1：导入限流等待与安全重试
 
 - 读取请求最小间隔改为 500ms；追加歌曲最小间隔为 3 秒，新建歌单为 10 秒。它们是保守的工程默认值，不是网易云公布的安全阈值，也不能保证账号不被限流。

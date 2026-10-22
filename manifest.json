@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "网易云红心歌单分类",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "按歌手整理网易云歌单，支持数量门槛和已有歌单配对。预览后追加，遇到限流显示冷却并安全重试。",
   "permissions": ["storage", "tabs"],
   "host_permissions": ["https://music.163.com/*", "http://music.163.com/*"],
