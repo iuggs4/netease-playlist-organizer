@@ -59,29 +59,40 @@ export const DEFAULT_DIMENSIONS: Dimension[] = [
   },
 ]
 
-export function normalizeDimensions(savedDimensions?: Dimension[]): Dimension[] {
-  const merged = DEFAULT_DIMENSIONS.map((fallback) => {
-    const saved = savedDimensions?.find((d) => d.key === fallback.key)
-    if (!saved) return { ...fallback }
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
 
-    if (saved.key === 'genre' || saved.key === 'artist') {
+function stringRecord(value: unknown): Record<string, string> | undefined {
+  if (!isRecord(value)) return undefined
+  return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+}
+
+export function normalizeDimensions(savedDimensions?: unknown): Dimension[] {
+  const savedList = Array.isArray(savedDimensions) ? savedDimensions.filter(isRecord) : []
+  const merged = DEFAULT_DIMENSIONS.map((fallback) => {
+    const saved = savedList.find((dimension) => dimension.key === fallback.key)
+    if (!saved) return { ...fallback, categories: [...fallback.categories] }
+
+    if (fallback.key === 'genre' || fallback.key === 'artist') {
       // 动态类别必须由当前来源歌单重新生成。
-      return { ...fallback, ...saved, categories: [], categoryHints: undefined, playlistNames: undefined }
+      return { ...fallback, categories: [], categoryHints: undefined, playlistNames: undefined }
     }
 
     return {
       ...fallback,
-      ...saved,
-      categories: saved.categories,
-      categoryHints: { ...fallback.categoryHints, ...saved.categoryHints },
-      playlistNames: { ...fallback.playlistNames, ...saved.playlistNames },
+      categories: Array.isArray(saved.categories) && saved.categories.every((category): category is string => typeof category === 'string')
+        ? [...saved.categories]
+        : [...fallback.categories],
+      categoryHints: { ...fallback.categoryHints, ...stringRecord(saved.categoryHints) },
+      playlistNames: { ...fallback.playlistNames, ...stringRecord(saved.playlistNames) },
     }
   })
 
   // 先保留旧用户的选择，避免新增默认维度覆盖已保存的设置。
-  const savedEnabled = savedDimensions?.filter((d) => d.enabled && merged.some((item) => item.key === d.key))
+  const savedEnabled = savedList.filter((dimension) => dimension.enabled === true && merged.some((item) => item.key === dimension.key))
   const selectedKey =
-    savedEnabled?.find((d) => d.key === 'genre')?.key ?? savedEnabled?.[0]?.key ?? 'artist'
+    savedEnabled.find((dimension) => dimension.key === 'genre')?.key ?? savedEnabled[0]?.key ?? 'artist'
 
   return merged.map((dimension) => ({
     ...dimension,
@@ -119,7 +130,8 @@ export function normalizeMinArtistSongs(value: unknown): number {
 
 export async function loadSettings(): Promise<Settings> {
   const got = await chrome.storage.local.get(SETTINGS_KEY)
-  const saved = got[SETTINGS_KEY] as Partial<Settings> | undefined
+  const stored = isRecord(got) ? got[SETTINGS_KEY] : undefined
+  const saved = isRecord(stored) ? stored : {}
   return {
     ...DEFAULT_SETTINGS,
     ...saved,

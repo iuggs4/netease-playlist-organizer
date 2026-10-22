@@ -153,10 +153,26 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    let active = true
     void (async () => {
-      setSettings(await loadSettings())
-      setCachedCount(await cacheSize())
+      const [saved, cached] = await Promise.allSettled([loadSettings(), cacheSize()])
+      if (!active) return
+      if (saved.status === 'fulfilled') setSettings(saved.value)
+      if (cached.status === 'fulfilled') setCachedCount(cached.value)
+      const failures = [
+        ...(saved.status === 'rejected' ? ['本地设置读取失败，暂用默认设置。'] : []),
+        ...(cached.status === 'rejected' ? ['分类缓存读取失败。'] : []),
+      ]
+      if (failures.length) {
+        setError((previous) => [previous, ...failures, '请重新加载面板；更新扩展后需刷新网易云网页。'].filter(Boolean).join(' '))
+      }
     })()
+    return () => { active = false }
+  }, [])
+
+  useEffect(() => () => {
+    abortRef.current?.abort()
+    applyAbortRef.current?.abort()
   }, [])
 
   /** 连接网易云：确认登录并拉取歌单 */

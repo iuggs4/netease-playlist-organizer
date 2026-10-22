@@ -10,6 +10,7 @@
 import type { NcmRequest, NcmRequestMessage, NcmResponse } from '@/lib/rpc'
 import { isWriteRequest, NcmRateLimitError, RATE_LIMIT_COOLDOWN_MS, requestIntervalMs, RPC_MAX_ATTEMPTS } from '@/lib/rpc'
 import { clampPanelPosition } from '@/lib/floating-layout'
+import { isPanelReadyMessage, PANEL_STARTUP_TIMEOUT_MS } from '@/lib/panel-startup'
 
 const BASE = 'https://music.163.com'
 
@@ -191,6 +192,7 @@ function createFloatingPanel(): void {
       :host { all: initial; }
       *, *::before, *::after { box-sizing: border-box; }
       .floating-window {
+        position: relative;
         display: flex;
         flex-direction: column;
         width: min(640px, calc(100vw - 24px));
@@ -264,6 +266,32 @@ function createFloatingPanel(): void {
         background: #f7f8fa;
       }
       .panel-frame[hidden] { display: none; }
+      .panel-startup {
+        position: absolute;
+        inset: 48px 0 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 16px;
+        padding: 24px;
+        overflow: auto;
+        background: #f7f8fa;
+        text-align: center;
+        line-height: 1.6;
+      }
+      .panel-startup[hidden], .panel-startup .reload-panel[hidden], .collapsed .panel-startup { display: none; }
+      .panel-startup .reload-panel {
+        width: auto;
+        height: auto;
+        flex: none;
+        padding: 9px 14px;
+        border-radius: 9px;
+        background: #e54843;
+        color: #fff;
+        font-size: 13px;
+        line-height: 1.4;
+      }
       .floating-window.collapsed {
         width: 48px;
         height: 48px;
@@ -322,6 +350,10 @@ function createFloatingPanel(): void {
         </button>
       </header>
       <iframe class="panel-frame" title="网易云红心歌单分类面板"></iframe>
+      <div class="panel-startup" role="status" aria-live="polite">
+        <span class="startup-message">正在加载歌单整理面板…</span>
+        <button class="reload-panel" type="button" hidden>重新加载面板</button>
+      </div>
     </section>
   `
 
@@ -330,7 +362,69 @@ function createFloatingPanel(): void {
   const collapseButton = floatingRoot.querySelector<HTMLButtonElement>('.collapse-button')
   const expandButton = floatingRoot.querySelector<HTMLButtonElement>('.expand-button')
   const shell = floatingRoot.querySelector<HTMLElement>('.floating-window')
-  if (!frame || !header || !collapseButton || !expandButton || !shell) return
+  const startup = floatingRoot.querySelector<HTMLElement>('.panel-startup')
+  const startupMessage = floatingRoot.querySelector<HTMLElement>('.startup-message')
+  const reloadButton = floatingRoot.querySelector<HTMLButtonElement>('.reload-panel')
+  if (!frame || !header || !collapseButton || !expandButton || !shell || !startup || !startupMessage || !reloadButton) return
+
+  let panelStarted = false
+  let startupTimer: ReturnType<typeof setTimeout> | undefined
+  const clearStartupTimer = () => {
+    if (startupTimer !== undefined) clearTimeout(startupTimer)
+    startupTimer = undefined
+  }
+  const cleanupStartup = () => {
+    clearStartupTimer()
+    window.removeEventListener('message', onPanelReady)
+    window.removeEventListener('pagehide', onPageHide)
+    frame.removeEventListener('error', onFrameError)
+  }
+  const onPageHide = (event: PageTransitionEvent) => {
+    if (!event.persisted) cleanupStartup()
+  }
+  const showStartupFailure = (message: string, canReload = true) => {
+    if (panelStarted) return
+    // 超时后仍接受迟到的 ready，避免已启动面板继续被遮挡。
+    clearStartupTimer()
+    startup.setAttribute('role', 'alert')
+    startupMessage.textContent = message
+    reloadButton.hidden = !canReload
+  }
+  const onPanelReady = (event: MessageEvent) => {
+    if (!isPanelReadyMessage(event, frame)) return
+    panelStarted = true
+    startup.hidden = true
+    reloadButton.hidden = true
+    frame.style.visibility = ''
+    cleanupStartup()
+  }
+  const onFrameError = () => showStartupFailure('面板加载失败。可重新加载面板；若刚更新扩展，请先刷新网易云页面。')
+  const startPanel = () => {
+    if (panelStarted) return
+    cleanupStartup()
+    startup.hidden = false
+    startup.setAttribute('role', 'status')
+    startupMessage.textContent = '正在加载歌单整理面板…'
+    reloadButton.hidden = true
+    frame.style.visibility = 'hidden'
+    try {
+      const runtime = typeof chrome === 'undefined' ? undefined : chrome.runtime
+      if (!runtime?.id) throw new Error('扩展上下文已失效')
+      const url = runtime.getURL('panel.html')
+      const parsed = new URL(url)
+      if (parsed.protocol !== 'chrome-extension:' || parsed.host !== runtime.id) throw new Error('扩展地址已失效')
+      parsed.searchParams.set('startup', crypto.randomUUID())
+      window.addEventListener('message', onPanelReady)
+      window.addEventListener('pagehide', onPageHide)
+      frame.addEventListener('error', onFrameError)
+      startupTimer = setTimeout(() => showStartupFailure('面板尚未启动。可重新加载面板；若刚更新扩展，请先刷新网易云页面。'), PANEL_STARTUP_TIMEOUT_MS)
+      frame.src = parsed.href
+    } catch {
+      cleanupStartup()
+      showStartupFailure('扩展连接已失效，请刷新网易云页面后重新打开插件。', false)
+    }
+  }
+  reloadButton.addEventListener('click', startPanel)
 
   let normalPosition: { left: number; top: number } | null = null
   expandButton.addEventListener('click', () => {
@@ -352,7 +446,6 @@ function createFloatingPanel(): void {
     keepPanelInViewport()
   })
 
-  frame.src = chrome.runtime.getURL('panel.html')
   collapseButton.addEventListener('click', (event) => {
     if (suppressNextToggleClick) {
       suppressNextToggleClick = false
@@ -405,6 +498,7 @@ function createFloatingPanel(): void {
   })
 
   document.documentElement.appendChild(floatingHost)
+  startPanel()
   setPanelCollapsed(false)
   new ResizeObserver(keepPanelInViewport).observe(shell)
   window.addEventListener('resize', keepPanelInViewport)

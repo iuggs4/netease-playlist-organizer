@@ -14,6 +14,8 @@ import { cacheKeyFor, loadSettings, normalizeDimensions, normalizeMinArtistSongs
 import { selftestArtistPlaylists } from './artist-playlists'
 import { selftestRateLimit } from './rate-limit'
 import { selftestWriterRateLimit } from './writer-rate-limit'
+import { selftestPanelStartup } from './panel-startup'
+import { selftestStoreStartup } from './store-startup'
 import { clampPanelPosition } from '@/lib/floating-layout'
 import { applyWritePlan, buildWritePlan, defaultDestinationFor, type CategoryWriteGroup } from '@/lib/writer'
 import { getUserPlaylists } from '@/lib/netease'
@@ -332,6 +334,8 @@ console.log('— 限流解析、冷却节奏与安全重试 —')
 for (const [name, selftest] of [
   ['传输限流保护', selftestRateLimit],
   ['导入冷却、核对与停止', selftestWriterRateLimit],
+  ['浮窗启动消息来源校验', selftestPanelStartup],
+  ['损坏旧设置与启动读取失败', selftestStoreStartup],
 ] as const) {
   try {
     await selftest()
