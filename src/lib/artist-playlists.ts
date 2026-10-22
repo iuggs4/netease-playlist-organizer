@@ -2,6 +2,7 @@ import { artistNames } from '@/lib/classifier/rules'
 import { getPlaylistTrackIds, getSongDetails, LIKED_SPECIAL_TYPE } from '@/lib/netease'
 import type { PlaylistBrief } from '@/lib/types'
 import type { DestinationChoice } from '@/lib/writer'
+import { NcmRateLimitError } from '@/lib/rpc'
 
 export interface ArtistPlaylistEvidence {
   playlistId: number
@@ -34,6 +35,7 @@ export async function scanArtistPlaylists(
         evidence.error = `歌单列表显示 ${playlist.trackCount} 首，实际读取 ${ids.length} 首，请刷新后重新配对。`
       }
     } catch (error) {
+      if (error instanceof NcmRateLimitError) throw error
       evidence.error = `读取歌单失败：${error instanceof Error ? error.message : String(error)}`
     }
     entries.push({ evidence, ids })
@@ -51,6 +53,7 @@ export async function scanArtistPlaylists(
         if (requested.has(song.id)) artistsById.set(song.id, artistNames(song))
       }
     } catch (error) {
+      if (error instanceof NcmRateLimitError) throw error
       const message = error instanceof Error ? error.message : String(error)
       for (const id of batch) errorsById.set(id, `读取歌曲详情失败：${message}`)
     }

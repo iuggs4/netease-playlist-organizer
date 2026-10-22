@@ -12,6 +12,8 @@ import { extractJson, generatePlaylistNameSuggestions, needsLlm, sampleGenreSong
 import { categoriesOf, classifySongs, groupByDimension, replaceArtistCategory } from '@/lib/classifier'
 import { cacheKeyFor, loadSettings, normalizeDimensions, normalizeMinArtistSongs, playlistNameCacheKeyFor, DEFAULT_SETTINGS, type CachedClass } from '@/lib/store'
 import { selftestArtistPlaylists } from './artist-playlists'
+import { selftestRateLimit } from './rate-limit'
+import { selftestWriterRateLimit } from './writer-rate-limit'
 import { clampPanelPosition } from '@/lib/floating-layout'
 import { applyWritePlan, buildWritePlan, defaultDestinationFor, type CategoryWriteGroup } from '@/lib/writer'
 import { getUserPlaylists } from '@/lib/netease'
@@ -325,6 +327,20 @@ await applyWritePlan(retryPlan)
 eq('重试只创建尚未创建的 B', createCount, 2)
 eq('重试成功把合唱写入 A', [...mockTracks.get(100)!], [2])
 eq('重试成功把合唱也写入 B', [...mockTracks.get(101)!], [2])
+
+console.log('— 限流解析、冷却节奏与安全重试 —')
+for (const [name, selftest] of [
+  ['传输限流保护', selftestRateLimit],
+  ['导入冷却、核对与停止', selftestWriterRateLimit],
+] as const) {
+  try {
+    await selftest()
+    eq(name, true, true)
+  } catch (error) {
+    console.error(error)
+    eq(name, false, true)
+  }
+}
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`)
 process.exit(fail > 0 ? 1 : 0)

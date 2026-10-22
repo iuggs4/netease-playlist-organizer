@@ -5,7 +5,7 @@ import type { SongOutcome } from '@/lib/classifier/llm'
 import { groupByDimension } from '@/lib/classifier'
 import { artistSongCounts } from '@/lib/classifier/rules'
 import type { ArtistDestinationResolution } from '@/lib/artist-playlists'
-import type { CategoryPlan, DestinationChoice } from '@/lib/writer'
+import type { ApplyProgress, CategoryPlan, DestinationChoice } from '@/lib/writer'
 import { defaultDestinationFor } from '@/lib/writer'
 import SongList from '../components/SongList'
 
@@ -21,6 +21,9 @@ interface Props {
   plans: CategoryPlan[]
   busy: boolean
   applyLog: string[]
+  applying: boolean
+  importProgress: ApplyProgress | null
+  onStopApply: () => void
   onDestinationChange: (category: string, choice: DestinationChoice) => void
   onSongCategoryChange: (songId: number, dim: DimensionKey, category: string, previousCategory: string) => void
   onMergeCategory: (source: string, target: string) => void
@@ -45,6 +48,9 @@ export default function PreviewStep({
   plans,
   busy,
   applyLog,
+  applying,
+  importProgress,
+  onStopApply,
   onDestinationChange,
   onSongCategoryChange,
   onMergeCategory,
@@ -84,6 +90,15 @@ export default function PreviewStep({
 
   return (
     <>
+      {applying && importProgress && (
+        <div className={`import-status ${importProgress.retryInSeconds !== undefined ? 'cooldown' : ''}`} role="status" aria-live="polite">
+          <div className="import-status-copy">
+            <strong className="truncate" title={importProgress.playlistName}>[{importProgress.index + 1}/{importProgress.total}] {importProgress.playlistName}</strong>
+            <span>{importProgress.message}</span>
+          </div>
+          {importProgress.retryInSeconds !== undefined && <strong className="cooldown-seconds">{importProgress.retryInSeconds}s</strong>}
+        </div>
+      )}
       <div className="step-content">
       <div className="card">
             <h2>{dim.label}分类结果</h2>
@@ -269,6 +284,7 @@ export default function PreviewStep({
         <h2>导入计划</h2>
         <p className="muted small">
           已有歌单只追加歌曲、跳过重复项，不会移除原有内容。多个类目可以合并到同一个目标歌单。
+          写入已减速：加歌至少间隔 3 秒，新建至少间隔 10 秒；遇到限流会冷却并核对目标后有限重试。
         </p>
         {plans.length === 0 && <p className="muted small">调整目标或归属后，请重新计算计划，再核对追加数量。</p>}
       </div>
@@ -332,8 +348,10 @@ export default function PreviewStep({
       <footer className="step-actions">
         <button onClick={onBack} disabled={busy}>上一步</button>
         <div className="actions-group">
+          {applying ? <button onClick={onStopApply}>停止导入</button> : <>
           <button onClick={onRebuildPlan} disabled={busy}>重新计算计划</button>
           <button className="primary" onClick={onApply} disabled={busy || !hasChanges || unresolvedCount > 0}>确认导入</button>
+          </>}
         </div>
       </footer>
     </>

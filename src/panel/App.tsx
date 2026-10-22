@@ -36,6 +36,8 @@ import {
   type DestinationChoice,
 } from '@/lib/writer'
 import { ensureHostPermission } from '@/lib/permissions'
+import { NcmRateLimitError } from '@/lib/rpc'
+import manifest from '../../manifest.json'
 import ConnectStep from './steps/ConnectStep'
 import SelectStep from './steps/SelectStep'
 import ConfigureStep from './steps/ConfigureStep'
@@ -120,8 +122,11 @@ export default function App() {
   const [scanWarnings, setScanWarnings] = useState<string[]>([])
   const [planMessage, setPlanMessage] = useState('')
   const [applyLog, setApplyLog] = useState<string[]>([])
+  const [applying, setApplying] = useState(false)
+  const [importProgress, setImportProgress] = useState<ApplyProgress | null>(null)
 
   const abortRef = useRef<AbortController | null>(null)
+  const applyAbortRef = useRef<AbortController | null>(null)
   const classifiedRunKeyRef = useRef<string | null>(null)
   const manualDestinationsRef = useRef<Record<string, DestinationChoice>>({})
 
@@ -452,10 +457,21 @@ export default function App() {
   }, [songs, outcomes, settings.dimensions, activeDimension, profile, destinations, appendLog])
 
   const applyPlan = useCallback(async () => {
+    if (applyAbortRef.current) return
+    if (!profile) {
+      setError('请先重新检测登录状态，再计算导入计划。')
+      return
+    }
+    const controller = new AbortController()
+    applyAbortRef.current = controller
     setBusy(true)
+    setApplying(true)
+    setImportProgress(null)
     setError(null)
     try {
       const result = await applyWritePlan(plans, {
+        userId: profile.userId,
+        signal: controller.signal,
         onCreated: (playlistName, playlistId) => {
           for (const [category, choice] of Object.entries(destinations)) {
             if (choice.kind === 'new' && choice.playlistName.trim() === playlistName) {
@@ -472,6 +488,8 @@ export default function App() {
           ))
         },
         onProgress: (p: ApplyProgress) => {
+          setImportProgress(p)
+          if (p.retryInSeconds !== undefined && p.retryInSeconds % 10 !== 0) return
           setApplyLog((prev) => [
             ...prev.slice(-199),
             `[${p.index + 1}/${p.total}] ${p.playlistName} — ${p.message}`,
@@ -480,16 +498,23 @@ export default function App() {
       })
       setApplyLog((prev) => [
         ...prev,
-        `完成：新建 ${result.created} 个，更新 ${result.updated} 个，写入 ${result.songWrites} 首`,
+        `完成：新建 ${result.created} 个，更新 ${result.updated} 个，确认写入 ${result.songWrites} 首`,
       ])
       await connect(true)
     } catch (err) {
-      setError(`导入已停止：${err instanceof Error ? err.message : String(err)} 请重新计算计划后再试。`)
+      const message = err instanceof Error && err.name === 'AbortError'
+        ? '已停止导入，已完成的写入会保留。请重新计算计划后再继续。'
+        : `导入已停止：${err instanceof Error ? err.message : String(err)}${err instanceof NcmRateLimitError ? '' : ' 请重新计算计划后再试。'}`
+      setError(message)
+      setApplyLog((previous) => [...previous, message])
     } finally {
+      applyAbortRef.current = null
+      setApplying(false)
+      setImportProgress(null)
       setPlans([])
       setBusy(false)
     }
-  }, [plans, connect, destinations])
+  }, [plans, connect, destinations, profile])
 
   const updateSongCategory = useCallback(
     (songId: number, dimKey: Settings['dimensions'][number]['key'], category: string, previousCategory = '') => {
@@ -575,7 +600,7 @@ export default function App() {
             <span className="section-kicker">歌单整理工作台</span>
             <h1>{STEP_LABELS[step]}</h1>
           </div>
-          <span className="step-counter">{currentIndex + 1} / {STEP_ORDER.length}</span>
+          <span className="step-counter">v{manifest.version} · {currentIndex + 1} / {STEP_ORDER.length}</span>
         </div>
         <p className="sub">{STEP_HINTS[step]}</p>
       <nav className="steps" aria-label="整理步骤">
@@ -689,6 +714,12 @@ export default function App() {
           plans={plans}
           busy={busy}
           applyLog={applyLog}
+          applying={applying}
+          importProgress={importProgress}
+          onStopApply={() => {
+            applyAbortRef.current?.abort()
+            setImportProgress((previous) => previous ? { ...previous, message: '正在停止，当前请求结束后不再执行后续写入…', retryInSeconds: undefined } : previous)
+          }}
           onDestinationChange={(category, choice) => {
             manualDestinationsRef.current[category] = choice
             setDestinations((previous) => ({ ...previous, [category]: choice }))

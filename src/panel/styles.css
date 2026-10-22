@@ -67,6 +67,11 @@ body {
 .actions-group { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-left: auto; }
 .action-status { flex: 1; min-width: 0; overflow-wrap: break-word; }
 .app-error { flex-shrink: 0; margin: 10px 20px 0 !important; max-height: min(140px, 25vh); overflow-y: auto; }
+.import-status { display: flex; align-items: center; gap: 12px; flex-shrink: 0; padding: 10px 20px; background: var(--accent-soft); border-bottom: 1px solid var(--border); font-size: 12px; }
+.import-status-copy { min-width: 0; flex: 1; }
+.import-status-copy > span { display: block; margin-top: 3px; overflow-wrap: break-word; }
+.import-status.cooldown { background: #fff7e6; color: var(--warn); }
+.cooldown-seconds { flex-shrink: 0; font-size: 24px; font-variant-numeric: tabular-nums; }
 
 h1 {
   font-size: 22px;

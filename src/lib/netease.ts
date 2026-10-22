@@ -11,7 +11,7 @@ import type {
   Song,
 } from '@/lib/types'
 import type { NcmRequest, NcmRequestMessage, NcmResponse } from '@/lib/rpc'
-import { NCM_AUTH_ERROR_CODES, NcmError } from '@/lib/rpc'
+import { NCM_AUTH_ERROR_CODES, NcmError, NcmRateLimitError, RATE_LIMIT_COOLDOWN_MS } from '@/lib/rpc'
 
 const MUSIC_ORIGIN = 'https://music.163.com'
 
@@ -49,13 +49,23 @@ async function callNcm(req: NcmRequest): Promise<unknown> {
   }
 
   if (!res?.ok) {
-    throw new NcmError(res?.error ?? '未知错误')
+    if (res?.code === 405 || res?.code === 429 || (res?.retryAfterMs ?? 0) > 0) {
+      throw new NcmRateLimitError(res.error, res.retryAfterMs, res.code)
+    }
+    throw new NcmError(res?.error ?? '未知错误', res?.code)
+  }
+  const body = res.data as { code?: number; message?: string } | null
+  if (res.status === 429 || body?.code === 405 || body?.code === 429) {
+    throw new NcmRateLimitError(
+      `网易云操作过于频繁，已暂停请求，请至少等待 ${RATE_LIMIT_COOLDOWN_MS / 1000} 秒后重新计算计划。`,
+      RATE_LIMIT_COOLDOWN_MS,
+      body?.code === 405 || body?.code === 429 ? body.code : 429,
+    )
   }
   if (res.status < 200 || res.status >= 300) {
     throw new NcmError(`网易云请求失败（HTTP ${res.status}），请重新计算计划后再试。`)
   }
 
-  const body = res.data as { code?: number; message?: string } | null
   if (!body || typeof body.code !== 'number') {
     throw new NcmError('网易云未返回有效的操作结果，请重新计算计划后再试。')
   }
@@ -97,20 +107,30 @@ export async function getProfile(): Promise<NeteaseProfile | null> {
 
 /** 用户全部歌单。「我喜欢的音乐」用 specialType === 5 识别。 */
 export async function getUserPlaylists(uid: number): Promise<PlaylistBrief[]> {
-  const data = (await raw('/api/user/playlist', {
-    uid,
-    limit: 1000,
-    offset: 0,
-    timestamp: Date.now(),
-  })) as { playlist?: PlaylistBrief[] } | null
-
-  return (data?.playlist ?? []).map((p) => ({
-    id: p.id,
-    name: p.name,
-    specialType: p.specialType,
-    trackCount: p.trackCount,
-    userId: p.userId,
-  }))
+  const playlists = new Map<number, PlaylistBrief>()
+  for (let offset = 0; ; ) {
+    const data = (await raw('/api/user/playlist', {
+      uid, limit: 1000, offset, timestamp: Date.now(),
+    })) as { playlist?: PlaylistBrief[]; more?: boolean } | null
+    if (!Array.isArray(data?.playlist) || (data.more !== undefined && typeof data.more !== 'boolean')) {
+      throw new NcmError('网易云未返回完整有效的歌单列表，已停止核对，不能据此重新创建歌单。')
+    }
+    const previousSize = playlists.size
+    for (const p of data.playlist) {
+      if (!p || !Number.isSafeInteger(p.id) || p.id <= 0 || typeof p.name !== 'string' || !Number.isSafeInteger(p.userId) || p.userId <= 0) {
+        throw new NcmError('网易云返回的歌单资料不完整，已停止核对，请稍后重新计算计划。')
+      }
+      playlists.set(p.id, {
+        id: p.id, name: p.name, specialType: p.specialType, trackCount: p.trackCount, userId: p.userId,
+      })
+    }
+    if (data.more === false || (data.more !== true && data.playlist.length < 1000)) break
+    if (playlists.size === previousSize) {
+      throw new NcmError('网易云歌单分页未返回完整的新数据，已停止核对，避免重复创建。')
+    }
+    offset += data.playlist.length
+  }
+  return [...playlists.values()]
 }
 
 export const LIKED_SPECIAL_TYPE = 5
@@ -130,15 +150,24 @@ export async function getPlaylistTrackIds(playlistId: number): Promise<number[]>
     n: 0,
     timestamp: Date.now(),
   })) as {
-    playlist?: { trackIds?: Array<{ id: number }>; tracks?: Array<{ id: number }> }
+    playlist?: { trackIds?: Array<{ id: number }>; tracks?: Array<{ id: number }>; trackCount?: number }
   } | null
 
   const pl = data?.playlist
-  if (!pl) return []
-
-  const ids = pl.trackIds?.map((t) => t.id) ?? pl.tracks?.map((t) => t.id) ?? []
-  // 网易会返回少量无效 id（已下架等），去重后交给调用方
-  return [...new Set(ids)]
+  if (!pl || (!Array.isArray(pl.trackIds) && !Array.isArray(pl.tracks))) {
+    throw new NcmError('网易云未返回完整歌曲列表，已停止核对，请稍后重新计算计划。')
+  }
+  if (!Array.isArray(pl.trackIds) && !Number.isSafeInteger(pl.trackCount)) {
+    throw new NcmError('网易云未返回完整歌曲 ID，不能确认目标中哪些歌曲已存在。')
+  }
+  const tracks = Array.isArray(pl.trackIds) ? pl.trackIds : pl.tracks!
+  const ids = [...new Set(tracks.map((t) => t?.id))]
+  // 不完整快照不能当作空歌单，否则限流恢复时会重复提交已接受的歌曲。
+  if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0) ||
+    (pl.trackCount !== undefined && (!Number.isSafeInteger(pl.trackCount) || pl.trackCount !== ids.length))) {
+    throw new NcmError('网易云返回的歌曲列表不完整，已停止核对，请稍后重新计算计划。')
+  }
+  return ids
 }
 
 interface RawSong {

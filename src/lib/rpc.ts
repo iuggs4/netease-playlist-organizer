@@ -21,11 +21,26 @@ export interface NcmRequestMessage {
 
 export type NcmResponse =
   | { ok: true; id: string; status: number; data: unknown }
-  | { ok: false; id: string; error: string }
+  | { ok: false; id: string; error: string; code?: number; retryAfterMs?: number }
 
 export const RPC_MAX_ATTEMPTS = 3
-/** 请求最小间隔，用来规避风控。实测太激进会被限流。 */
-export const RPC_MIN_INTERVAL_MS = 220
+/** 保守的客户端节奏，不是网易云公布的接口限额。 */
+export const RPC_MIN_INTERVAL_MS = 500
+export const RPC_WRITE_INTERVAL_MS = 3_000
+export const RPC_CREATE_INTERVAL_MS = 10_000
+export const RATE_LIMIT_COOLDOWN_MS = 60_000
+
+export function isWriteRequest(req: NcmRequest): boolean {
+  return req.method === 'POST' && (
+    req.path === '/api/playlist/create' || req.path === '/api/playlist/manipulate/tracks'
+  )
+}
+
+export function requestIntervalMs(req: NcmRequest): number {
+  if (!isWriteRequest(req)) return RPC_MIN_INTERVAL_MS
+  return req.path === '/api/playlist/create' ? RPC_CREATE_INTERVAL_MS : RPC_WRITE_INTERVAL_MS
+}
+
 /** 服务端返回 301 / 250 通常意味着登录态失效 */
 export const NCM_AUTH_ERROR_CODES = new Set([301, 250, -462])
 
@@ -36,5 +51,16 @@ export class NcmError extends Error {
   ) {
     super(message)
     this.name = 'NcmError'
+  }
+}
+
+export class NcmRateLimitError extends NcmError {
+  constructor(
+    message: string,
+    readonly retryAfterMs: number = RATE_LIMIT_COOLDOWN_MS,
+    code = 405,
+  ) {
+    super(message, code)
+    this.name = 'NcmRateLimitError'
   }
 }

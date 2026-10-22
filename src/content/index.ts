@@ -8,7 +8,7 @@
  */
 
 import type { NcmRequest, NcmRequestMessage, NcmResponse } from '@/lib/rpc'
-import { RPC_MAX_ATTEMPTS, RPC_MIN_INTERVAL_MS } from '@/lib/rpc'
+import { isWriteRequest, NcmRateLimitError, RATE_LIMIT_COOLDOWN_MS, requestIntervalMs, RPC_MAX_ATTEMPTS } from '@/lib/rpc'
 import { clampPanelPosition } from '@/lib/floating-layout'
 
 const BASE = 'https://music.163.com'
@@ -30,13 +30,27 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 /** 全局串行队列：保证请求之间有间隔，不会并发轰接口。 */
 let chain: Promise<unknown> = Promise.resolve()
 let lastAt = 0
+let cooldownUntil = 0
 
-function enqueue<T>(task: () => Promise<T>): Promise<T> {
+function checkCooldown(): void {
+  const remaining = cooldownUntil - Date.now()
+  if (remaining > 0) {
+    throw new NcmRateLimitError(
+      `网易云操作过于频繁，冷却中，请 ${Math.ceil(remaining / 1000)} 秒后重新计算计划。`,
+      remaining,
+    )
+  }
+}
+
+function enqueue<T>(req: NcmRequest, task: () => Promise<T>): Promise<T> {
+  checkCooldown()
   const run = async (): Promise<T> => {
-    const wait = RPC_MIN_INTERVAL_MS - (Date.now() - lastAt)
+    checkCooldown()
+    const wait = requestIntervalMs(req) - (Date.now() - lastAt)
     if (wait > 0) {
       await sleep(wait)
     }
+    checkCooldown()
     try {
       return await task()
     } finally {
@@ -86,25 +100,31 @@ async function send(req: NcmRequest): Promise<{ status: number; data: unknown }>
   }
 
   const res = await fetch(url.toString(), init)
+  if (res.status === 429) cooldownUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS
   const text = await res.text()
   if (!text) return { status: res.status, data: null }
 
   // 网易云用 text/plain 返回 JSON，不能依赖 res.json()
   try {
-    return { status: res.status, data: JSON.parse(text) }
+    const data: unknown = JSON.parse(text)
+    const code = (data as { code?: number } | null)?.code
+    if (code === 405 || code === 429) cooldownUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS
+    return { status: res.status, data }
   } catch {
-    throw new Error(`响应不是 JSON（HTTP ${res.status}）：${text.slice(0, 120)}`)
+    if (res.status === 429) return { status: res.status, data: null }
+    throw new Error(`响应不是 JSON（HTTP ${res.status}）`)
   }
 }
 
 async function sendWithRetry(req: NcmRequest) {
+  checkCooldown()
   let lastErr: unknown
   for (let attempt = 1; attempt <= RPC_MAX_ATTEMPTS; attempt++) {
     try {
-      return await enqueue(() => send(req))
+      return await enqueue(req, () => send(req))
     } catch (err) {
-      // 创建结果不确定时先刷新核对，直接重发可能创建重复歌单。
-      if (req.path === '/api/playlist/create') throw err
+      // 写入结果不确定时先刷新核对，不能因网络异常直接重放。
+      if (err instanceof NcmRateLimitError || isWriteRequest(req)) throw err
       lastErr = err
     }
     if (attempt < RPC_MAX_ATTEMPTS) {
@@ -413,6 +433,7 @@ chrome.runtime.onMessage.addListener(
           ok: false,
           id: msg.id,
           error: err instanceof Error ? err.message : String(err),
+          ...(err instanceof NcmRateLimitError ? { code: err.code, retryAfterMs: err.retryAfterMs } : {}),
         } satisfies NcmResponse),
       )
 
